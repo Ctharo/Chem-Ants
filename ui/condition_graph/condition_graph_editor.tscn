@@ -1,0 +1,486 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" uid="uid://c5akmr2s3828a" path="res://ui/condition_graph/condition_graph_editor.gd" id="1_editor"]
+[ext_resource type="Script" uid="uid://dq8lj1ieo3ojy" path="res://ui/condition_graph/trace_layer.gd" id="2_traces"]
+
+[sub_resource type="StyleBoxFlat" id="sb_marquee"]
+bg_color = Color(0.352941, 0.690196, 1, 0.14)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.352941, 0.690196, 1, 1)
+corner_radius_top_left = 3
+corner_radius_top_right = 3
+corner_radius_bottom_right = 3
+corner_radius_bottom_left = 3
+
+[node name="ConditionGraphEditor" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_editor")
+
+[node name="Background" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.0392157, 0.0588235, 0.0784314, 1)
+
+[node name="Stage" type="Control" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = 60.0
+grow_horizontal = 2
+grow_vertical = 2
+clip_contents = true
+
+[node name="GridLayer" type="Control" parent="Stage"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="World" type="Control" parent="Stage"]
+unique_name_in_owner = true
+layout_mode = 0
+mouse_filter = 2
+
+[node name="TraceLayer" type="Control" parent="Stage/World"]
+unique_name_in_owner = true
+layout_mode = 0
+mouse_filter = 2
+script = ExtResource("2_traces")
+
+[node name="NodesLayer" type="Control" parent="Stage/World"]
+unique_name_in_owner = true
+layout_mode = 0
+mouse_filter = 2
+
+[node name="Marquee" type="Panel" parent="Stage/World"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 0
+mouse_filter = 2
+theme_override_styles/panel = SubResource("sb_marquee")
+
+[node name="TopBar" type="PanelContainer" parent="."]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 60.0
+grow_horizontal = 2
+
+[node name="HBox" type="HBoxContainer" parent="TopBar"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Brand" type="VBoxContainer" parent="TopBar/HBox"]
+layout_mode = 2
+size_flags_vertical = 4
+theme_override_constants/separation = 1
+
+[node name="Eyebrow" type="Label" parent="TopBar/HBox/Brand"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.337255, 0.407843, 0.470588, 1)
+theme_override_font_sizes/font_size = 10
+text = "B E H A V I O R"
+
+[node name="BehaviorName" type="Label" parent="TopBar/HBox/Brand"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.905882, 0.933333, 0.956863, 1)
+theme_override_font_sizes/font_size = 15
+text = "Behavior"
+
+[node name="Crumbs" type="HBoxContainer" parent="TopBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 4
+
+[node name="ZoomCtl" type="HBoxContainer" parent="TopBar/HBox"]
+layout_mode = 2
+size_flags_vertical = 4
+theme_override_constants/separation = 2
+
+[node name="ZoomOut" type="Button" parent="TopBar/HBox/ZoomCtl"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "-"
+
+[node name="ZoomLabel" type="Button" parent="TopBar/HBox/ZoomCtl"]
+unique_name_in_owner = true
+layout_mode = 2
+tooltip_text = "Reset zoom"
+text = "100%"
+
+[node name="ZoomIn" type="Button" parent="TopBar/HBox/ZoomCtl"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "+"
+
+[node name="ArrangeBtn" type="Button" parent="TopBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Auto-layout this level"
+text = "Arrange"
+
+[node name="CondBtn" type="Button" parent="TopBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+toggle_mode = true
+text = "Conditions"
+
+[node name="VarsBtn" type="Button" parent="TopBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+toggle_mode = true
+text = "Variables"
+
+[node name="BackBtn" type="Button" parent="TopBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 4
+tooltip_text = "Up one level (Esc)"
+disabled = true
+text = "Back"
+
+[node name="LibraryPanel" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 0
+offset_left = 16.0
+offset_top = 76.0
+offset_right = 234.0
+offset_bottom = 140.0
+
+[node name="VBox" type="VBoxContainer" parent="LibraryPanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Head" type="HBoxContainer" parent="LibraryPanel/VBox"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="LibraryPanel/VBox/Head"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.337255, 0.407843, 0.470588, 1)
+theme_override_font_sizes/font_size = 10
+text = "CONDITIONS"
+
+[node name="LibClose" type="Button" parent="LibraryPanel/VBox/Head"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "x"
+
+[node name="GroupScroll" type="ScrollContainer" parent="LibraryPanel/VBox"]
+custom_minimum_size = Vector2(0, 130)
+layout_mode = 2
+horizontal_scroll_mode = 0
+
+[node name="GroupList" type="VBoxContainer" parent="LibraryPanel/VBox/GroupScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="Legend" type="HBoxContainer" parent="LibraryPanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="VarsPanel" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -254.0
+offset_top = 76.0
+offset_right = -16.0
+offset_bottom = 140.0
+grow_horizontal = 0
+
+[node name="VBox" type="VBoxContainer" parent="VarsPanel"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Head" type="HBoxContainer" parent="VarsPanel/VBox"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="VarsPanel/VBox/Head"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.337255, 0.407843, 0.470588, 1)
+theme_override_font_sizes/font_size = 10
+text = "TEST VALUES"
+
+[node name="VarsClose" type="Button" parent="VarsPanel/VBox/Head"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "x"
+
+[node name="VarsScroll" type="ScrollContainer" parent="VarsPanel/VBox"]
+custom_minimum_size = Vector2(0, 300)
+layout_mode = 2
+horizontal_scroll_mode = 0
+
+[node name="VarsList" type="VBoxContainer" parent="VarsPanel/VBox/VarsScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 10
+
+[node name="InspectorPanel" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -260.0
+offset_top = -80.0
+offset_right = -16.0
+offset_bottom = -16.0
+grow_horizontal = 0
+grow_vertical = 0
+
+[node name="VBox" type="VBoxContainer" parent="InspectorPanel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Head" type="HBoxContainer" parent="InspectorPanel/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="InspGlyph" type="Label" parent="InspectorPanel/VBox/Head"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_font_sizes/font_size = 14
+text = "-"
+
+[node name="InspTitle" type="Label" parent="InspectorPanel/VBox/Head"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.905882, 0.933333, 0.956863, 1)
+theme_override_font_sizes/font_size = 13
+text = "Inspector"
+text_overrun_behavior = 3
+
+[node name="InspEmpty" type="Label" parent="InspectorPanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.337255, 0.407843, 0.470588, 1)
+theme_override_font_sizes/font_size = 12
+text = "Click a node to edit it. Ctrl-click adds to a selection; click the Output rail to include the gate."
+autowrap_mode = 3
+
+[node name="FormBox" type="VBoxContainer" parent="InspectorPanel/VBox"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="SingleRow" type="HBoxContainer" parent="InspectorPanel/VBox"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="CopyBtn" type="Button" parent="InspectorPanel/VBox/SingleRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Copy"
+
+[node name="DeleteBtn" type="Button" parent="InspectorPanel/VBox/SingleRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Delete"
+
+[node name="MultiBox" type="VBoxContainer" parent="InspectorPanel/VBox"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="MultiCount" type="Label" parent="InspectorPanel/VBox/MultiBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.337255, 0.407843, 0.470588, 1)
+theme_override_font_sizes/font_size = 10
+text = "0 selected"
+
+[node name="SaveCondBtn" type="Button" parent="InspectorPanel/VBox/MultiBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Save as condition"
+
+[node name="MultiRow" type="HBoxContainer" parent="InspectorPanel/VBox/MultiBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="CopyBtnM" type="Button" parent="InspectorPanel/VBox/MultiBox/MultiRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Copy"
+
+[node name="DeleteBtnM" type="Button" parent="InspectorPanel/VBox/MultiBox/MultiRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Delete"
+
+[node name="PkgBar" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 5
+anchor_left = 0.5
+anchor_right = 0.5
+offset_top = 74.0
+offset_bottom = 120.0
+grow_horizontal = 2
+
+[node name="HBox" type="HBoxContainer" parent="PkgBar"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="PkgLabel" type="Label" parent="PkgBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.905882, 0.933333, 0.956863, 1)
+theme_override_font_sizes/font_size = 12
+text = "You edited an instance of a condition."
+
+[node name="PkgUpdate" type="Button" parent="PkgBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Update everywhere"
+
+[node name="PkgNew" type="Button" parent="PkgBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Save as new"
+
+[node name="PkgKeep" type="Button" parent="PkgBar/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Keep here"
+
+[node name="Toast" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_top = -60.0
+offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 0
+
+[node name="ToastLabel" type="Label" parent="Toast"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.905882, 0.933333, 0.956863, 1)
+theme_override_font_sizes/font_size = 12
+text = "Toast"
+
+[node name="ModalLayer" type="Control" parent="."]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Scrim" type="ColorRect" parent="ModalLayer"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.0235294, 0.0392157, 0.054902, 0.55)
+
+[node name="Center" type="CenterContainer" parent="ModalLayer"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="ModalPanel" type="PanelContainer" parent="ModalLayer/Center"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(320, 0)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="ModalLayer/Center/ModalPanel"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="ModalTitle" type="Label" parent="ModalLayer/Center/ModalPanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.905882, 0.933333, 0.956863, 1)
+theme_override_font_sizes/font_size = 15
+text = "Title"
+
+[node name="ModalDesc" type="Label" parent="ModalLayer/Center/ModalPanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.556863, 0.627451, 0.690196, 1)
+theme_override_font_sizes/font_size = 12
+text = "Description"
+autowrap_mode = 3
+
+[node name="ModalInput" type="LineEdit" parent="ModalLayer/Center/ModalPanel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+caret_blink = true
+
+[node name="Row" type="HBoxContainer" parent="ModalLayer/Center/ModalPanel/VBox"]
+layout_mode = 2
+alignment = 2
+theme_override_constants/separation = 9
+
+[node name="ModalCancel" type="Button" parent="ModalLayer/Center/ModalPanel/VBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Cancel"
+
+[node name="ModalSave" type="Button" parent="ModalLayer/Center/ModalPanel/VBox/Row"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Save"
