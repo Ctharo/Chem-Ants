@@ -1,17 +1,6 @@
 class_name ConditionGraphEditor
 extends Control
-## Runtime condition-graph editor scene (not a @tool plugin).
-##
-## Ported from an HTML/JS mockup. Interaction model:
-##   Single click gate .... expand/collapse in place; active branch stays bright
-##   Single click leaf .... select (edit in the Inspector)
-##   Double click gate .... enter it (drill down); Back / Esc / breadcrumb = exit
-##   Drag node ............ move (per-layer); Ctrl+click / drag-blank = select
-##   Drag OUT port ........ wire downstream (into a gate, the rail, or blank = create)
-##   Drag IN / rail port .. wire upstream (add / create an input)
-##   Pan .................. wheel, middle-drag, or Space + drag
-##   Zoom ................. Ctrl + wheel or the -/+ controls
-##   Right click .......... context menu (add nodes, insert saved conditions)
+## Runtime condition-graph editor scene
 
 const COLORS := {
 	"bg": Color("0a0f14"), "grid": Color(0.47, 0.65, 0.76, 0.055),
