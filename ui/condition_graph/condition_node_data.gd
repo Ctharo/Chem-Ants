@@ -195,7 +195,7 @@ static func _truthy(v: Variant) -> bool:
 	if v is bool:
 		return v
 	if v is float or v is int:
-		return v != 0
+		return not is_zero_approx(v)
 	return false
 
 

@@ -1610,43 +1610,43 @@ func _render_vars() -> void:
 	for c in vars_list.get_children():
 		vars_list.remove_child(c)
 		c.queue_free()
-	for name: String in test_vars.keys():
-		var wrap := VBoxContainer.new()
-		wrap.add_theme_constant_override("separation", 4)
+	for _name: String in test_vars.keys():
+		var _wrap := VBoxContainer.new()
+		_wrap.add_theme_constant_override("separation", 4)
 		var head := HBoxContainer.new()
 		var nl := _tiny_label(name, COLORS["text"], 12)
 		nl.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		head.add_child(nl)
-		wrap.add_child(head)
-		if test_vars[name] is bool:
+		_wrap.add_child(head)
+		if test_vars[_name] is bool:
 			var cb := CheckButton.new()
-			cb.button_pressed = test_vars[name]
-			cb.text = "true" if test_vars[name] else "false"
+			cb.button_pressed = test_vars[_name]
+			cb.text = "true" if test_vars[_name] else "false"
 			cb.add_theme_font_size_override("font_size", 11)
 			cb.add_theme_color_override("font_color", COLORS["dim"])
 			cb.focus_mode = Control.FOCUS_NONE
-			var vn := name
+			var vn := _name
 			cb.toggled.connect(func(on: bool) -> void:
 				test_vars[vn] = on
 				cb.text = "true" if on else "false"
 				_repaint())
-			wrap.add_child(cb)
+			_wrap.add_child(cb)
 		else:
-			var vl := _tiny_label(str(test_vars[name]), COLORS["property"], 12)
+			var vl := _tiny_label(str(test_vars[_name]), COLORS["property"], 12)
 			head.add_child(vl)
 			var slider := HSlider.new()
 			slider.min_value = 0
 			slider.max_value = 100
 			slider.step = 0.5
-			slider.value = float(test_vars[name])
+			slider.value = float(test_vars[_name])
 			slider.focus_mode = Control.FOCUS_NONE
-			var vn := name
+			var vn := _name
 			slider.value_changed.connect(func(v: float) -> void:
 				test_vars[vn] = v
 				vl.text = str(v)
 				_repaint())
-			wrap.add_child(slider)
-		vars_list.add_child(wrap)
+			_wrap.add_child(slider)
+		vars_list.add_child(_wrap)
 
 
 # ============================================================================
