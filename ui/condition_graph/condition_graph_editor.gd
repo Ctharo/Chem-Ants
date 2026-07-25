@@ -15,6 +15,7 @@ const COLORS: Dictionary = {
 	"property": Color("78d67e"), "literal": Color("b596f2"), "focus": Color("e7eef4"),
 	"sel": Color("5ab0ff"), "true": Color("4bd88a"), "false": Color("ff6274"),
 	"timing": Color("ff7eb6"), "query": Color("ff8f5e"),
+	"vector": Color("7fd7ff"),
 }
 
 ## Reserved key inside a layer's position map holding the output rail's spot.
@@ -247,7 +248,7 @@ func _ready() -> void:
 
 
 func _check_glyph_coverage() -> void:
-	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7"
+	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7\u2220\u2212\u21bb\u00fb\u03b8\u00b7"	
 	for i: int in needed.length():
 		if not ui_font.has_char(needed.unicode_at(i)):
 			ConditionNodeData.ascii_mode = true
@@ -990,7 +991,6 @@ func _repaint(delta: float = 0.0) -> void:
 	rail.out_state = gr["value"] if gr["is_bool"] else null
 	rail.selected = gate_selected
 	rail.queue_redraw()
-
 
 # ============================================================================
 # Spotlight / expansion helpers
@@ -1979,6 +1979,14 @@ func _open_blank_menu(wp: Vector2) -> void:
 		["query", "distance", "Sense - distance to nearest"],
 		["query", "exists", "Sense - anything nearby"],
 		["query", "count", "Sense - how many"],
+		["query", "direction", "Sense - direction to nearest"],
+		["query", "offset", "Sense - offset to nearest"],
+		["vector", "const", "Vector - fixed value"],
+		["vector", "from_angle", "Vector - from angle"],
+		["vector", "scale", "Vector - scale"],
+		["vector", "add", "Vector - add"],
+		["vector", "length", "Vector - length"],
+		["vector", "angle", "Vector - angle"],
 		["property", "", "Property"], ["literal", "", "Constant"],
 	]
 	for d: Array in defs:
@@ -2008,6 +2016,9 @@ func _open_create_menu(_wp: Vector2, cb: Callable) -> void:
 		["timing", "delay", "Timing - true after"],
 		["compare", "lt", "Comparison"], ["query", "distance", "Sense query"],
 		["property", "", "Property"], ["literal", "", "Constant"],
+		["query", "direction", "Sense - direction"],
+		["vector", "length", "Vector - length"],
+		["vector", "scale", "Vector - scale"],
 	]
 	for d: Array in defs:
 		var kind: String = d[0]
@@ -2021,8 +2032,12 @@ func _open_create_menu(_wp: Vector2, cb: Callable) -> void:
 # Variables panel
 # ============================================================================
 func _var_type(p_name: String) -> String:
-	return "bool" if test_vars.get(p_name) is bool else "float"
-
+	var v: Variant = test_vars.get(p_name)
+	if v is bool:
+		return "bool"
+	if v is Vector2:
+		return "vector"
+	return "float"
 
 ## Variable names grouped by schema category, in a stable display order.
 func _variables_by_category() -> Dictionary:
@@ -2109,6 +2124,9 @@ func _build_var_row(var_name: String) -> Control:
 			_repaint())
 		wrap.add_child(cb)
 		return wrap
+	if test_vars[var_name] is Vector2:
+		wrap.add_child(_build_vector_editor(var_name, head))
+		return wrap
 	var spec: Dictionary = AntSchema.describe(var_name)
 	var low: float = spec["min"]
 	var high: float = spec["max"]
@@ -2128,6 +2146,51 @@ func _build_var_row(var_name: String) -> Control:
 	wrap.add_child(slider)
 	return wrap
 
+
+## Vectors are edited as angle plus length. That is how a player reasons about
+## "direction to the nearest food", and it makes length 0 - the canonical
+## "nothing sensed" - a single obvious slider position.
+func _build_vector_editor(var_name: String, head: HBoxContainer) -> Control:
+	var top: float = maxf(0.001, AntSchema.max_of(var_name))
+	var current: Vector2 = test_vars[var_name]
+	var value_label: Label = _tiny_label(_vec_text(current), COLORS["vector"], 12)
+	head.add_child(value_label)
+
+	var box: VBoxContainer = VBoxContainer.new()
+	box.add_theme_constant_override("separation", 2)
+	var angle_slider: HSlider = HSlider.new()
+	angle_slider.min_value = -180.0
+	angle_slider.max_value = 180.0
+	angle_slider.step = 1.0
+	angle_slider.value = 0.0 if current.is_zero_approx() else rad_to_deg(current.angle())
+	angle_slider.focus_mode = Control.FOCUS_NONE
+	var length_slider: HSlider = HSlider.new()
+	length_slider.min_value = 0.0
+	length_slider.max_value = top
+	length_slider.step = maxf(0.01, snappedf(top / 200.0, 0.01))
+	length_slider.value = clampf(current.length(), 0.0, top)
+	length_slider.focus_mode = Control.FOCUS_NONE
+
+	var apply: Callable = func() -> void:
+		var v: Vector2 = Vector2.RIGHT.rotated(
+			deg_to_rad(angle_slider.value)) * length_slider.value
+		test_vars[var_name] = v
+		value_label.text = _vec_text(v)
+		_repaint()
+	angle_slider.value_changed.connect(func(_v: float) -> void: apply.call())
+	length_slider.value_changed.connect(func(_v: float) -> void: apply.call())
+
+	box.add_child(_tiny_label("angle", COLORS["faint"], 9))
+	box.add_child(angle_slider)
+	box.add_child(_tiny_label("length", COLORS["faint"], 9))
+	box.add_child(length_slider)
+	return box
+
+
+func _vec_text(v: Vector2) -> String:
+	if v.is_zero_approx():
+		return "none"
+	return "(%.1f, %.1f)" % [v.x, v.y]
 
 # ============================================================================
 # Inspector
@@ -2376,7 +2439,69 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				node.label = node.op.to_upper()
 				_commit_edit())
 			form_box.add_child(ob)
-
+		"vector":
+			form_box.add_child(_form_label("Operation"))
+			var ob: OptionButton = OptionButton.new()
+			_style_option(ob)
+			for i: int in ConditionNodeData.VECTOR_OPS.size():
+				var vop: String = ConditionNodeData.VECTOR_OPS[i]
+				ob.add_item(ConditionNodeData.VECTOR_NAMES.get(vop, vop), i)
+				if vop == node.op:
+					ob.selected = i
+			ob.item_selected.connect(func(i: int) -> void:
+				node.op = ConditionNodeData.VECTOR_OPS[i]
+				node.type = ConditionNodeData.vector_type_of(node.op)
+				_commit_edit())
+			form_box.add_child(ob)
+			if node.op == "const":
+				form_box.add_child(_form_label("Value"))
+				var xy: HBoxContainer = HBoxContainer.new()
+				xy.add_theme_constant_override("separation", 6)
+				var sx: SpinBox = SpinBox.new()
+				sx.min_value = -9999.0
+				sx.max_value = 9999.0
+				sx.step = 0.1
+				sx.value = node.vec.x
+				_style_spin(sx)
+				var sy: SpinBox = SpinBox.new()
+				sy.min_value = -9999.0
+				sy.max_value = 9999.0
+				sy.step = 0.1
+				sy.value = node.vec.y
+				_style_spin(sy)
+				sx.value_changed.connect(func(v: float) -> void:
+					node.vec.x = v
+					insp_title.text = node.display_label()
+					var w: GraphNodeWidget = widgets.get(node.id)
+					if w:
+						w.refresh()
+					_repaint())
+				sy.value_changed.connect(func(v: float) -> void:
+					node.vec.y = v
+					insp_title.text = node.display_label()
+					var w: GraphNodeWidget = widgets.get(node.id)
+					if w:
+						w.refresh()
+					_repaint())
+				xy.add_child(sx)
+				xy.add_child(sy)
+				form_box.add_child(xy)
+			form_box.add_child(_form_label("Inputs"))
+			var wants: Array = ConditionNodeData.VECTOR_INPUTS.get(node.op, [])
+			var wiring: Label = Label.new()
+			wiring.text = "none" if wants.is_empty() else "in order: %s" % ", ".join(
+				PackedStringArray(wants))
+			wiring.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			wiring.add_theme_font_size_override("font_size", 11)
+			wiring.add_theme_color_override("font_color", COLORS["dim"])
+			form_box.add_child(wiring)
+			form_box.add_child(_form_label("What it does"))
+			var help: Label = Label.new()
+			help.text = ConditionNodeData.VECTOR_HELP.get(node.op, "")
+			help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			help.add_theme_font_size_override("font_size", 11)
+			help.add_theme_color_override("font_color", COLORS["faint"])
+			form_box.add_child(help)
 
 func _update_inspector() -> void:
 	var ids: Array = selection.keys()

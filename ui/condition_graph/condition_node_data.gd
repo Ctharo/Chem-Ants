@@ -2,11 +2,12 @@ class_name ConditionNodeData
 extends RefCounted
 ## Data model for one node in a condition graph.
 ##
-## kind: "logic" | "compare" | "timing" | "query" | "property" | "literal"
+## kind: "logic" | "compare" | "timing" | "query" | "property" | "literal" | "vector"
 ## op:   logic  -> and/or/not/xor
 ##       compare-> lt/gt/eq/le/ge/ne
 ##       timing -> delay/hold/pulse/cooldown/latch
 ##       query  -> distance/count/exists/mass
+##       vector -> const/from_angle/add/sub/scale/rotate/normalize/length/angle/dot
 ## type: "bool" | "float" | "int"
 ##
 ## Evaluation is UI-free: pass a Dictionary of variable values to [method tick].
@@ -16,7 +17,46 @@ extends RefCounted
 const LOGIC_OPS: Array[String] = ["and", "or", "not", "xor"]
 const CMP_OPS: Array[String] = ["lt", "gt", "eq", "le", "ge", "ne"]
 const TIMING_OPS: Array[String] = ["delay", "hold", "pulse", "cooldown", "latch"]
-const QUERY_MEASURES: Array[String] = ["distance", "count", "exists", "mass"]
+const QUERY_MEASURES: Array[String] = [
+	"distance", "count", "exists", "mass", "direction", "offset",
+]
+const VECTOR_OPS: Array[String] = [
+	"const", "from_angle", "add", "sub", "scale", "rotate", "normalize",
+	"length", "angle", "dot",
+]
+
+## Result type of each vector-kind operation.
+const VECTOR_TYPES: Dictionary = {
+	"const": "vector", "from_angle": "vector", "add": "vector", "sub": "vector",
+	"scale": "vector", "rotate": "vector", "normalize": "vector",
+	"length": "float", "angle": "float", "dot": "float",
+}
+## Inputs each vector op consumes, in wiring order, with the type each must be.
+const VECTOR_INPUTS: Dictionary = {
+	"const": [], "from_angle": ["float"], "add": ["vector", "vector"],
+	"sub": ["vector", "vector"], "scale": ["vector", "float"],
+	"rotate": ["vector", "float"], "normalize": ["vector"],
+	"length": ["vector"], "angle": ["vector"], "dot": ["vector", "vector"],
+}
+const VECTOR_NAMES: Dictionary = {
+	"const": "fixed vector", "from_angle": "vector from angle",
+	"add": "add vectors", "sub": "subtract vectors", "scale": "scale vector",
+	"rotate": "rotate vector", "normalize": "unit vector",
+	"length": "length of vector", "angle": "angle of vector",
+	"dot": "dot product",
+}
+const VECTOR_HELP: Dictionary = {
+	"const": "A vector you type in. Degrees are measured clockwise from east.",
+	"from_angle": "Turns a number of degrees into a unit vector.",
+	"add": "Vector sum of both inputs.",
+	"sub": "First input minus the second.",
+	"scale": "Stretches a vector by a number.",
+	"rotate": "Turns a vector by a number of degrees.",
+	"normalize": "Same direction, length 1. A zero vector stays zero.",
+	"length": "How long the vector is - 0 means nothing was sensed.",
+	"angle": "Degrees from east, in the range -180 to 180.",
+	"dot": "Positive when the two vectors broadly agree, negative when opposed.",
+}
 const QUERY_SUBJECTS: Array[String] = [
 	"food", "ant", "enemy", "nestmate", "colony", "pheromone",
 ]
@@ -27,6 +67,9 @@ const GLYPHS: Dictionary = {
 	"lt": "<", "gt": ">", "eq": "=", "le": "\u2264", "ge": "\u2265", "ne": "\u2260",
 	"delay": "T+", "hold": "T-", "pulse": "1\u00d7", "cooldown": "CD", "latch": "SR",
 	"query": "\u25ce", "property": "\u25c6", "literal": "#",
+	"const": "V", "from_angle": "\u2220", "add": "+", "sub": "\u2212",
+	"scale": "\u00d7", "rotate": "\u21bb", "normalize": "\u00fb",
+	"length": "|v|", "angle": "\u03b8", "dot": "\u00b7",
 }
 ## Fallback set used when the active font is missing the unicode glyphs.
 const ASCII_GLYPHS: Dictionary = {
@@ -34,6 +77,9 @@ const ASCII_GLYPHS: Dictionary = {
 	"lt": "<", "gt": ">", "eq": "=", "le": "<=", "ge": ">=", "ne": "!=",
 	"delay": "T+", "hold": "T-", "pulse": "1x", "cooldown": "CD", "latch": "SR",
 	"query": "@", "property": "*", "literal": "#",
+	"const": "V", "from_angle": "<)", "add": "+", "sub": "-",
+	"scale": "*", "rotate": "@", "normalize": "^v",
+	"length": "|v|", "angle": "th", "dot": ".",
 }
 const OP_WORDS: Dictionary = {
 	"lt": "less", "gt": "greater", "eq": "equal",
@@ -70,6 +116,7 @@ const SCOPE_WORDS: Dictionary = {
 const MEASURE_WORDS: Dictionary = {
 	"distance": "distance to nearest", "count": "number of",
 	"exists": "presence of", "mass": "mass of nearest",
+	"direction": "direction to nearest", "offset": "offset to nearest",
 }
 
 ## Set to true by the editor if the UI font lacks the unicode glyph set.
@@ -90,6 +137,8 @@ var pkg_name: String = ""
 var seconds: float = 1.0
 ## Query nodes: what is being sensed and how far out to look.
 var subject: String = "food"
+## Vector nodes with op "const": the literal value.
+var vec: Vector2 = Vector2.ZERO
 var scope: String = "visible"
 
 # --- timing runtime state (never serialised) ---------------------------------
@@ -146,6 +195,10 @@ static func create(p_kind: String, p_op: String = "") -> ConditionNodeData:
 		"literal":
 			n.type = "float"
 			n.label = "0.0"
+		"vector":
+			n.op = p_op if p_op != "" else "const"
+			n.type = vector_type_of(n.op)
+			n.label = ""
 	return n
 
 
@@ -195,6 +248,8 @@ static func op_name(p_op: String) -> String:
 		return "%s %s" % [glyph_for(p_op), TIMING_NAMES.get(p_op, p_op)]
 	if p_op in QUERY_MEASURES:
 		return MEASURE_WORDS.get(p_op, p_op)
+	if p_op in VECTOR_OPS:
+		return "%s %s" % [glyph_for(p_op), VECTOR_NAMES.get(p_op, p_op)]
 	return "%s %s" % [glyph_for(p_op), OP_WORDS.get(p_op, p_op)]
 
 
@@ -208,7 +263,7 @@ static func scope_name(p_scope: String) -> String:
 
 ## Gates accept inputs, can be entered, and can be wired into.
 func is_gate() -> bool:
-	return kind == "logic" or kind == "compare" or kind == "timing"
+	return kind == "logic" or kind == "compare" or kind == "timing" or kind == "vector"
 
 
 func is_timing() -> bool:
@@ -233,12 +288,19 @@ func kind_title() -> String:
 			return "Sense"
 		"property":
 			return "Property"
+		"vector":
+			return "Vector"
 	return "Constant"
 
 
 ## Value type a query measure produces.
 func measure_type() -> String:
-	return "bool" if op == "exists" else "float"
+	match op:
+		"exists":
+			return "bool"
+		"direction", "offset":
+			return "vector"
+	return "float"
 
 
 ## The variable key a query reads, e.g. "food.visible.distance".
@@ -274,7 +336,19 @@ func display_label() -> String:
 				"mass":
 					return "mass of nearest %s %s" % [
 						scope_word, SUBJECT_WORDS.get(subject, subject)]
+				"direction":
+					return "direction to nearest %s %s" % [
+						scope_word, SUBJECT_WORDS.get(subject, subject)]
+				"offset":
+					return "offset to nearest %s %s" % [
+						scope_word, SUBJECT_WORDS.get(subject, subject)]
 			return var_key()
+		"vector":
+			if label != "":
+				return label
+			if op == "const":
+				return "(%s, %s)" % [_trim_number(vec.x), _trim_number(vec.y)]
+			return VECTOR_NAMES.get(op, op)
 	return label
 
 
@@ -295,6 +369,7 @@ func to_dict() -> Dictionary:
 		"id": id, "kind": kind, "op": op, "type": type, "label": label,
 		"pkg_id": pkg_id, "pkg_name": pkg_name,
 		"seconds": seconds, "subject": subject, "scope": scope,
+		"vec": [vec.x, vec.y],
 		"children": kids,
 	}
 
@@ -319,6 +394,10 @@ static func from_dict(data: Variant) -> ConditionNodeData:
 	n.seconds = maxf(0.0, float(d.get("seconds", 1.0)))
 	n.subject = str(d.get("subject", "food"))
 	n.scope = str(d.get("scope", "visible"))
+	var raw_vec: Variant = d.get("vec", [])
+	if raw_vec is Array and (raw_vec as Array).size() == 2:
+		var vec_parts: Array = raw_vec
+		n.vec = Vector2(float(vec_parts[0]), float(vec_parts[1]))
 	var kids: Variant = d.get("children", [])
 	if kids is Array:
 		for raw: Variant in (kids as Array):
@@ -351,6 +430,7 @@ func clone_exact() -> ConditionNodeData:
 	c.seconds = seconds
 	c.subject = subject
 	c.scope = scope
+	c.vec = vec
 	for child: ConditionNodeData in children:
 		c.children.append(child.clone_exact())
 	return c
@@ -431,7 +511,21 @@ static func _truthy(v: Variant) -> bool:
 		return not is_zero_approx(v)
 	return false
 
+static func _as_vector(v: Variant) -> Vector2:
+	if v is Vector2:
+		return v
+	return Vector2.ZERO
 
+## Standard result envelope. "is_bool" is derived and kept only for older call
+## sites - read "type" in new code.
+static func _result(value: Variant, vtype: String) -> Dictionary:
+	return {"value": value, "type": vtype, "is_bool": vtype == "bool"}
+
+## A node that cannot produce an answer: missing inputs, or inputs of the wrong
+## type. Propagates upward instead of guessing.
+static func _undefined() -> Dictionary:
+	return _result(null, "bool")
+	
 static func _as_number(v: Variant) -> float:
 	if v is bool:
 		return 1.0 if v else 0.0
@@ -463,27 +557,38 @@ func evaluate(vars: Dictionary) -> Dictionary:
 func _compute(vars: Dictionary, delta: float, cache: Dictionary) -> Dictionary:
 	match kind:
 		"literal":
-			return {"value": label.to_float(), "is_bool": false}
+			return _result(label.to_float(), "float")
 		"property":
 			var val: Variant = vars.get(label)
-			if type == "bool":
-				return {"value": _truthy(val), "is_bool": true}
-			return {"value": _as_number(val), "is_bool": false}
+			match type:
+				"bool":
+					return _result(_truthy(val), "bool")
+				"vector":
+					return _result(_as_vector(val), "vector")
+			return _result(_as_number(val), "float")
 		"query":
 			var key: String = var_key()
 			var raw: Variant = vars.get(key, AntSchema.default_for(key))
-			if measure_type() == "bool":
-				return {"value": _truthy(raw), "is_bool": true}
-			return {"value": _as_number(raw), "is_bool": false}
+			match measure_type():
+				"bool":
+					return _result(_truthy(raw), "bool")
+				"vector":
+					return _result(_as_vector(raw), "vector")
+			return _result(_as_number(raw), "float")
+		"vector":
+			return _compute_vector(vars, delta, cache)
 		"compare":
 			if children.size() < 2:
-				return {"value": null, "is_bool": true}
-			var av: Variant = children[0].tick(vars, delta, cache)["value"]
-			var bv: Variant = children[1].tick(vars, delta, cache)["value"]
-			if av == null or bv == null:
-				return {"value": null, "is_bool": true}
-			var a: float = _as_number(av)
-			var b: float = _as_number(bv)
+				return _undefined()
+			var ar: Dictionary = children[0].tick(vars, delta, cache)
+			var br: Dictionary = children[1].tick(vars, delta, cache)
+			if ar["value"] == null or br["value"] == null:
+				return _undefined()
+			# Vectors are not ordered. Take a length or an angle first.
+			if ar["type"] == "vector" or br["type"] == "vector":
+				return _undefined()
+			var a: float = _as_number(ar["value"])
+			var b: float = _as_number(br["value"])
 			var res: bool = false
 			match op:
 				"lt": res = a < b
@@ -492,26 +597,29 @@ func _compute(vars: Dictionary, delta: float, cache: Dictionary) -> Dictionary:
 				"le": res = a <= b
 				"ge": res = a >= b
 				"ne": res = not is_equal_approx(a, b)
-			return {"value": res, "is_bool": true}
+			return _result(res, "bool")
 		"timing":
 			if children.is_empty():
-				return {"value": null, "is_bool": true}
+				return _undefined()
 			var inr: Dictionary = children[0].tick(vars, delta, cache)
-			if inr["value"] == null:
-				return {"value": null, "is_bool": true}
+			if inr["value"] == null or inr["type"] == "vector":
+				return _undefined()
 			var input: bool = _truthy(inr["value"])
 			var reset: bool = false
 			if children.size() > 1:
-				reset = _truthy(children[1].tick(vars, delta, cache)["value"])
-			return {"value": _advance(input, reset, delta), "is_bool": true}
+				var rr: Dictionary = children[1].tick(vars, delta, cache)
+				if rr["type"] == "vector":
+					return _undefined()
+				reset = _truthy(rr["value"])
+			return _result(_advance(input, reset, delta), "bool")
 		"logic":
 			if children.is_empty():
-				return {"value": null, "is_bool": true}
+				return _undefined()
 			var kid_vals: Array = []
 			for c: ConditionNodeData in children:
 				var r: Dictionary = c.tick(vars, delta, cache)
-				if r["value"] == null:
-					return {"value": null, "is_bool": true}
+				if r["value"] == null or r["type"] == "vector":
+					return _undefined()
 				kid_vals.append(r["value"])
 			var out: bool = false
 			match op:
@@ -533,10 +641,50 @@ func _compute(vars: Dictionary, delta: float, cache: Dictionary) -> Dictionary:
 					for v: Variant in kid_vals:
 						parity ^= 1 if _truthy(v) else 0
 					out = parity == 1
-			return {"value": out, "is_bool": true}
-	return {"value": null, "is_bool": true}
+			return _result(out, "bool")
+	return _undefined()
 
 
+## Vector-kind ops. Inputs are read in wiring order and must match
+## VECTOR_INPUTS exactly; anything missing or mistyped leaves the node
+## undefined rather than being coerced into something plausible.
+func _compute_vector(vars: Dictionary, delta: float, cache: Dictionary) -> Dictionary:
+	if op == "const":
+		return _result(vec, "vector")
+	var wants: Array = VECTOR_INPUTS.get(op, [])
+	if children.size() < wants.size():
+		return _undefined()
+	var vals: Array = []
+	for i: int in wants.size():
+		var r: Dictionary = children[i].tick(vars, delta, cache)
+		if r["value"] == null or r["type"] != str(wants[i]):
+			return _undefined()
+		vals.append(r["value"])
+	match op:
+		"from_angle":
+			return _result(Vector2.RIGHT.rotated(deg_to_rad(_as_number(vals[0]))),
+				"vector")
+		"add":
+			return _result(_as_vector(vals[0]) + _as_vector(vals[1]), "vector")
+		"sub":
+			return _result(_as_vector(vals[0]) - _as_vector(vals[1]), "vector")
+		"scale":
+			return _result(_as_vector(vals[0]) * _as_number(vals[1]), "vector")
+		"rotate":
+			return _result(_as_vector(vals[0]).rotated(deg_to_rad(_as_number(vals[1]))),
+				"vector")
+		"normalize":
+			var v: Vector2 = _as_vector(vals[0])
+			return _result(Vector2.ZERO if v.is_zero_approx() else v.normalized(),
+				"vector")
+		"length":
+			return _result(_as_vector(vals[0]).length(), "float")
+		"angle":
+			return _result(rad_to_deg(_as_vector(vals[0]).angle()), "float")
+		"dot":
+			return _result(_as_vector(vals[0]).dot(_as_vector(vals[1])), "float")
+	return _undefined()
+	
 ## Drive the timer. A non-positive delta is a peek: report the current output
 ## without consuming edges or advancing time.
 func _advance(input: bool, reset: bool, delta: float) -> bool:
@@ -597,3 +745,6 @@ func timer_progress() -> float:
 
 func timer_remaining() -> float:
 	return _timer
+	
+static func vector_type_of(p_op: String) -> String:
+	return str(VECTOR_TYPES.get(p_op, "vector"))
