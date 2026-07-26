@@ -94,6 +94,8 @@ var marquee_add: bool = false
 var marquee_base: Dictionary = {}
 var _click_token: int = 0
 var _nav_tween: Tween = null
+var _boot_done: bool = false
+
 
 signal _modal_done(text: String)
 
@@ -239,22 +241,24 @@ func _ready() -> void:
 	_check_glyph_coverage()
 	ConditionLibrary.dev_reset_user_data()
 	_build_sample_document()
+
+	# Graph state first: _build_viewport() is unusable without it.
+	path = [tree_root] as Array[ConditionNodeData]
+	expanded = _layer_expansion(tree_root.id)
+
 	_load_library()
 	_apply_styles()
 	_connect_chrome()
 	rail = OutputRailWidget.new(COLORS, ui_font)
-	rail.rail_clicked.connect(_on_rail_clicked)
-	rail.rail_port_pressed.connect(_on_rail_port_pressed)
+	var _rc: int = rail.rail_clicked.connect(_on_rail_clicked)
+	var _rp: int = rail.rail_port_pressed.connect(_on_rail_port_pressed)
 	world.add_child(rail)
 	world.move_child(rail, world.get_child_count() - 1)
 	behavior_label.text = behavior_title
-	stage.resized.connect(func() -> void: _build_viewport(true))
-	var win: Window = get_window()
-	win.size_changed.connect(func() -> void: _set_ui_scale(_auto_ui_scale()))
-	_set_ui_scale(_auto_ui_scale())
-	grid_layer.draw.connect(_draw_grid)
-	path = [tree_root]
-	expanded = _layer_expansion(tree_root.id)
+	var _gd: int = grid_layer.draw.connect(_draw_grid)
+
+
+	_boot_done = true
 	call_deferred("_render_all")
 
 
@@ -683,7 +687,7 @@ func _place_tree(n: ConditionNodeData, right_edge: float, top: float) -> void:
 
 
 func _build_viewport(skip_anim: bool = false) -> void:
-	if not is_node_ready() or stage.size.x < 2:
+	if not _boot_done or path.is_empty() or stage.size.x < 2:
 		return
 	var old_pos: Dictionary = node_pos.duplicate()
 	for c: Node in nodes_layer.get_children():
@@ -2604,22 +2608,3 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		else:
 			_go_back()
 		get_viewport().set_input_as_handled()
-
-func _set_ui_scale(next: float) -> void:
-	ui_scale = clampf(snappedf(next, 0.05), MIN_UI_SCALE, MAX_UI_SCALE)
-	get_window().content_scale_factor = ui_scale
-	# The root viewport resizes, which fires stage.resized -> _build_viewport.
-
-
-## Scale from the window's short edge so a 4K panel doesn't render 10px labels.
-func _auto_ui_scale() -> float:
-	var win_h: float = float(get_window().size.y)
-	return clampf(snappedf(win_h / DESIGN_HEIGHT, 0.25), MIN_UI_SCALE, MAX_UI_SCALE)
-
-
-func _toggle_fullscreen() -> void:
-	var win: Window = get_window()
-	var was_full: bool = win.mode == Window.MODE_FULLSCREEN \
-		or win.mode == Window.MODE_EXCLUSIVE_FULLSCREEN
-	win.mode = Window.MODE_WINDOWED if was_full else Window.MODE_FULLSCREEN
-	_set_ui_scale(_auto_ui_scale())
