@@ -11,32 +11,27 @@ extends Control
 ## canvas folds it into [member world]'s transform via [method _view_scale] and
 ## the chrome re-derives its font sizes, so nothing here touches
 ## Window.content_scale_factor and the simulation keeps rendering at 1:1.
+##
+## Placement math lives in [GraphLayout]; the single-node edit form lives in
+## [GraphInspector]. Both are wired up in _ready().
 
 const COLORS: Dictionary = GraphTheme.COLORS
 
-## Reserved key inside a layer's position map holding the output rail's spot.
-const RAIL_KEY: String = "#rail"
+## Layout constants live in GraphLayout; these aliases keep external readers
+## (OutputRailWidget sizes itself from RAIL_W / RAIL_H) and this file's own
+## extents code pointing at a single source of truth.
+const RAIL_KEY: String = GraphLayout.RAIL_KEY
+const GUTTER: float = GraphLayout.GUTTER
+const RAIL_W: float = GraphLayout.RAIL_W
+const RAIL_H: float = GraphLayout.RAIL_H
 
-const V_GAP: float = 24.0       # vertical gap between sibling subtrees
-const GUTTER: float = 56.0      # left gutter for auto-layout
-const COL_GAP: float = 70.0     # horizontal gap between a parent and its children
-const RAIL_W: float = 130.0
-const RAIL_H: float = 112.0
 const CLICK_SLOP: float = 4.0
 const SINGLE_CLICK_DELAY: float = 0.27
 const MIN_ZOOM: float = 0.4
 const MAX_ZOOM: float = 2.0
-const MIN_UI_SCALE: float = 0.75
-const MAX_UI_SCALE: float = 2.5
-const UI_SCALE_STEP: float = 0.05
-## Height the layout was authored against; used to derive an automatic scale.
-const DESIGN_HEIGHT: float = 900.0
 ## Top bar height at 1.0 interface scale.
 const TOP_BAR_H: float = 60.0
 
-## Keep the layer this far off the canvas origin: nothing left of x = 0 or above
-## y = 0 is reachable, because _clamp_pan() never lets the world scroll positive.
-const EDGE_PAD: float = 24.0
 ## Breathing room when scrolling something into view.
 const REVEAL_PAD: float = 32.0
 
@@ -93,6 +88,7 @@ var groups: Array[Dictionary] = []      # {"id", "name", "root": ConditionNodeDa
 var dirty_pkg: Variant = null           # null | {"node", "group"}
 var zoom: float = 1.0
 var skin: GraphTheme = null
+var inspector: GraphInspector = null
 var content_size: Vector2 = Vector2(100, 100)
 ## True while any timing node exists, which puts the editor into live ticking.
 var live: bool = false
@@ -212,6 +208,7 @@ func _ready() -> void:
 	_connect_chrome()
 	_place_back_button()
 	_setup_movable_panels()
+	_setup_inspector()
 	rail = OutputRailWidget.new(COLORS, skin.font)
 	var _rc: int = rail.rail_clicked.connect(_on_rail_clicked)
 	var _rp: int = rail.rail_port_pressed.connect(_on_rail_port_pressed)
@@ -223,6 +220,21 @@ func _ready() -> void:
 
 	_boot_done = true
 	call_deferred("_render_all")
+
+
+## The form builder lives in GraphInspector and talks back through signals;
+## anything it needs from this side goes in as a typed Callable.
+func _setup_inspector() -> void:
+	inspector = GraphInspector.new()
+	inspector.setup(skin, form_box, insp_title, widgets)
+	inspector.prompt = _prompt
+	inspector.variables_by_category = _variables_by_category
+	inspector.var_type = _var_type
+	inspector.trim_range = ConditionGraphEditor._trim_range
+	var _ic: int = inspector.committed.connect(func() -> void: _commit_edit())
+	var _ip: int = inspector.soft_changed.connect(func() -> void: _repaint())
+	var _iv: int = inspector.vars_changed.connect(func() -> void: _render_vars())
+	var _ir: int = inspector.refresh_requested.connect(func() -> void: _update_inspector())
 
 
 ## Wires the slider only - `skin` already holds the scale by the time this runs.
@@ -304,26 +316,13 @@ func _persist_library() -> void:
 		push_error("Condition library: save failed (error %d)." % err)
 
 
-
-## Starting point on a fresh launch: match the height the layout was authored at.
-func _auto_ui_scale() -> float:
-	return clampf(float(get_window().size.y) / DESIGN_HEIGHT, MIN_UI_SCALE, MAX_UI_SCALE)
-
-
 func _on_ui_scale_changed(value: float) -> void:
 	_set_ui_scale(value)
 
 
-
-
-
-
-
-
+## Short display form for a sense range, e.g. "60 units".
 static func _trim_range(v: float) -> String:
 	return "%d units" % roundi(v)
-
-
 
 
 func _apply_styles() -> void:
@@ -574,6 +573,19 @@ func _layer_positions() -> Dictionary:
 	return positions[key]
 
 
+## Fresh snapshot of everything GraphLayout reads and writes. Built per call so
+## it can never hold a stale `expanded` set or another layer's position map.
+func _layout_ctx() -> GraphLayout.Ctx:
+	var ctx: GraphLayout.Ctx = GraphLayout.Ctx.new()
+	ctx.widgets = widgets
+	ctx.node_pos = node_pos
+	ctx.expanded = expanded
+	ctx.layer_positions = _layer_positions()
+	ctx.visible_nodes = visible_nodes
+	ctx.stage_size = stage.size
+	return ctx
+
+
 ## Expansion set stored for a layer. `expanded` mirrors the current one.
 func _layer_expansion(layer_id: String) -> Dictionary:
 	if not expanded_by_layer.has(layer_id):
@@ -682,37 +694,6 @@ func _walk_visible(n: ConditionNodeData, parent: ConditionNodeData) -> void:
 		for c: ConditionNodeData in n.children:
 			_walk_visible(c, n)
 
-
-func _sub_height(n: ConditionNodeData) -> float:
-	var h: float = widgets[n.id].size.y
-	if not expanded.has(n.id) or n.children.is_empty():
-		return h
-	var s: float = 0.0
-	for i: int in n.children.size():
-		s += _sub_height(n.children[i]) + (V_GAP if i > 0 else 0.0)
-	return maxf(h, s)
-
-
-func _place_tree(n: ConditionNodeData, right_edge: float, top: float) -> void:
-	var w: GraphNodeWidget = widgets[n.id]
-	var s: float = _sub_height(n)
-	var lp: Dictionary = _layer_positions()
-	var pos: Vector2
-	if lp.has(n.id):
-		pos = lp[n.id]
-	else:
-		pos = Vector2(right_edge - w.size.x, top + s * 0.5 - w.size.y * 0.5)
-	node_pos[n.id] = pos
-	if expanded.has(n.id) and not n.children.is_empty():
-		var kid_total: float = 0.0
-		for i: int in n.children.size():
-			kid_total += _sub_height(n.children[i]) + (V_GAP if i > 0 else 0.0)
-		var cy: float = pos.y + w.size.y * 0.5 - kid_total * 0.5
-		for c: ConditionNodeData in n.children:
-			_place_tree(c, pos.x - COL_GAP, cy)
-			cy += _sub_height(c) + V_GAP
-
-
 func _build_viewport(skip_anim: bool = false) -> void:
 	if not _boot_done or path.is_empty() or stage.size.x < 2:
 		return
@@ -749,12 +730,14 @@ func _build_viewport(skip_anim: bool = false) -> void:
 	# own a remembered position, so a rebuild never shuffles them. Only a brand
 	# new layer, a newly added card, or the Arrange button computes positions.
 	var stage_size: Vector2 = stage.size
-	_ensure_top_positions(f, loose_roots, stage_size)
+	var ctx: GraphLayout.Ctx = _layout_ctx()
+	GraphLayout.ensure_top_positions(ctx, f, loose_roots)
 	for c: ConditionNodeData in f.children:
-		_place_tree(c, 0.0, 0.0)
+		GraphLayout.place_tree(ctx, c, 0.0, 0.0)
 	for n: ConditionNodeData in loose_roots:
-		_place_tree(n, 0.0, 0.0)
-	_make_room(f, loose_roots)
+		GraphLayout.place_tree(ctx, n, 0.0, 0.0)
+	GraphLayout.make_room(ctx, f, loose_roots, _needs_room)
+	_needs_room = false
 
 	# Extents. The rail follows the wired tree only, so dropping a card off to
 	# the right doesn't drag the output with it.
@@ -813,199 +796,6 @@ func _build_viewport(skip_anim: bool = false) -> void:
 	for n: ConditionNodeData in visible_nodes:
 		prev_visible[n.id] = true
 	_repaint()
-
-
-## Give every top-level card a stored position. An empty layer gets the full
-## tidy tree layout; a layer that already has positions only places newcomers,
-## which is what keeps existing cards still.
-func _ensure_top_positions(f: ConditionNodeData, loose_roots: Array[ConditionNodeData],
-		stage_size: Vector2) -> void:
-	var tops: Array[ConditionNodeData] = []
-	for c: ConditionNodeData in f.children:
-		tops.append(c)
-	for n: ConditionNodeData in loose_roots:
-		tops.append(n)
-	if tops.is_empty():
-		return
-	var lp: Dictionary = _layer_positions()
-	var known: int = 0
-	for t: ConditionNodeData in tops:
-		if lp.has(t.id):
-			known += 1
-	if known == 0:
-		_auto_layout_layer(f, loose_roots, stage_size)
-		return
-	if known == tops.size():
-		return
-	var bottom: float = 44.0
-	for t: ConditionNodeData in tops:
-		if lp.has(t.id):
-			bottom = maxf(bottom, (lp[t.id] as Vector2).y + widgets[t.id].size.y)
-	var y: float = bottom + V_GAP
-	for t: ConditionNodeData in tops:
-		if lp.has(t.id):
-			continue
-		lp[t.id] = Vector2(GUTTER, y)
-		y += widgets[t.id].size.y + V_GAP
-
-
-## Full tidy pass for one layer: the wired tree fans right-to-left and is
-## centred, unwired roots stack underneath. Results are stored, so this is the
-## only thing that ever moves an existing card.
-func _auto_layout_layer(f: ConditionNodeData, loose_roots: Array[ConditionNodeData],
-		stage_size: Vector2) -> void:
-	var lp: Dictionary = _layer_positions()
-	lp.clear()
-	node_pos.clear()
-	var total: float = 0.0
-	for i: int in f.children.size():
-		total += _sub_height(f.children[i]) + (V_GAP if i > 0 else 0.0)
-	var tree_h: float = maxf(stage_size.y, total + 130.0)
-	var col0: float = stage_size.x - 250.0
-	var y: float = maxf(44.0, tree_h * 0.5 - total * 0.5)
-	for r: ConditionNodeData in f.children:
-		_place_tree(r, col0, y)
-		y += _sub_height(r) + V_GAP
-
-	var min_l: float = INF
-	for n: ConditionNodeData in visible_nodes:
-		if node_pos.has(n.id):
-			min_l = minf(min_l, node_pos[n.id].x)
-	if min_l != INF and absf(GUTTER - min_l) > 0.5:
-		var shift: float = GUTTER - min_l
-		for n: ConditionNodeData in visible_nodes:
-			if node_pos.has(n.id):
-				node_pos[n.id].x += shift
-
-	var bottom: float = 44.0
-	for n: ConditionNodeData in visible_nodes:
-		if node_pos.has(n.id):
-			bottom = maxf(bottom, node_pos[n.id].y + widgets[n.id].size.y)
-	var ly: float = bottom + 40.0
-	for n: ConditionNodeData in loose_roots:
-		_place_tree(n, GUTTER + widgets[n.id].size.x, ly)
-		_nudge_subtree_into_view(n)
-		ly += _sub_height(n) + V_GAP
-
-	for c: ConditionNodeData in f.children:
-		lp[c.id] = node_pos[c.id]
-	for n: ConditionNodeData in loose_roots:
-		lp[n.id] = node_pos[n.id]
-	var tree_r: float = GUTTER
-	for c: ConditionNodeData in f.children:
-		tree_r = maxf(tree_r, node_pos[c.id].x + widgets[c.id].size.x)
-	lp[RAIL_KEY] = Vector2(maxf(stage_size.x - 150.0, tree_r + 90.0),
-		tree_h * 0.5 - RAIL_H * 0.5)
-
-
-## Shove an auto-placed subtree right if its expanded children ran off the left.
-func _nudge_subtree_into_view(root_node: ConditionNodeData) -> void:
-	var ids: Array[String] = _visible_subtree_ids(root_node.id)
-	var lmin: float = INF
-	for sid: String in ids:
-		if node_pos.has(sid):
-			lmin = minf(lmin, node_pos[sid].x)
-	if lmin == INF or lmin >= 20.0:
-		return
-	var d: float = 20.0 - lmin
-	for sid: String in ids:
-		if node_pos.has(sid):
-			node_pos[sid].x += d
-
-
-# ---- keeping an expansion on screen ----------------------------------------
-## Children fan out to the *left* of their parent, so expanding a deep gate can
-## push cards past x = 0 (unreachable) and can grow a subtree straight through
-## its siblings. This runs after placement and fixes both, writing results back
-## to the layer store so the shuffle is permanent rather than cosmetic.
-func _make_room(f: ConditionNodeData, loose_roots: Array[ConditionNodeData]) -> void:
-	var tops: Array[ConditionNodeData] = []
-	for c: ConditionNodeData in f.children:
-		tops.append(c)
-	for n: ConditionNodeData in loose_roots:
-		tops.append(n)
-	if tops.is_empty():
-		return
-	if _needs_room:
-		_needs_room = false
-		_separate_subtrees(tops)
-	_shift_into_canvas()
-
-
-## Bounding box of everything currently drawn for this root.
-func _subtree_rect(n: ConditionNodeData) -> Rect2:
-	var out: Rect2 = Rect2()
-	var started: bool = false
-	for sid: String in _visible_subtree_ids(n.id):
-		if not node_pos.has(sid) or not widgets.has(sid):
-			continue
-		var box: Rect2 = Rect2(node_pos[sid], (widgets[sid] as GraphNodeWidget).size)
-		if started:
-			out = out.merge(box)
-		else:
-			out = box
-			started = true
-	return out
-
-
-func _shift_subtree(n: ConditionNodeData, delta: Vector2) -> void:
-	if delta.is_zero_approx():
-		return
-	var lp: Dictionary = _layer_positions()
-	for sid: String in _visible_subtree_ids(n.id):
-		if node_pos.has(sid):
-			node_pos[sid] = (node_pos[sid] as Vector2) + delta
-		if lp.has(sid):
-			lp[sid] = (lp[sid] as Vector2) + delta
-
-
-## Top-down sweep: each subtree drops below anything it collides with.
-func _separate_subtrees(tops: Array[ConditionNodeData]) -> void:
-	var order: Array[ConditionNodeData] = tops.duplicate()
-	order.sort_custom(func(a: ConditionNodeData, b: ConditionNodeData) -> bool:
-		return _subtree_rect(a).position.y < _subtree_rect(b).position.y)
-	var taken: Array[Rect2] = []
-	for n: ConditionNodeData in order:
-		var box: Rect2 = _subtree_rect(n)
-		if box.size.y <= 0.0:
-			continue
-		var start_y: float = box.position.y
-		var moved: bool = true
-		var guard: int = 0
-		while moved and guard < 8:
-			moved = false
-			guard += 1
-			for other: Rect2 in taken:
-				if box.intersects(other):
-					box.position.y = other.end.y + V_GAP
-					moved = true
-		_shift_subtree(n, Vector2(0.0, box.position.y - start_y))
-		taken.append(box)
-
-
-## The canvas grows right and down on its own, but _clamp_pan() never scrolls
-## positive, so anything at negative coordinates is unreachable. Move the layer
-## instead of the view.
-func _shift_into_canvas() -> void:
-	var min_l: float = INF
-	var min_t: float = INF
-	for n: ConditionNodeData in visible_nodes:
-		if not node_pos.has(n.id):
-			continue
-		var p: Vector2 = node_pos[n.id]
-		min_l = minf(min_l, p.x)
-		min_t = minf(min_t, p.y)
-	if min_l == INF:
-		return
-	var delta: Vector2 = Vector2(maxf(0.0, EDGE_PAD - min_l), maxf(0.0, EDGE_PAD - min_t))
-	if delta.is_zero_approx():
-		return
-	var lp: Dictionary = _layer_positions()
-	for key: String in lp.keys():
-		lp[key] = (lp[key] as Vector2) + delta
-	for nid: String in node_pos.keys():
-		node_pos[nid] = (node_pos[nid] as Vector2) + delta
-
 
 ## Pan the stage until `area` (world space) is on screen.
 func _reveal_rect(area: Rect2) -> void:
@@ -1199,19 +989,12 @@ func _collapse_from(id: String) -> void:
 	_set_expansion(keep)
 
 
+## Id-based front door for the drag code; the walk itself lives in GraphLayout.
 func _visible_subtree_ids(id: String) -> Array[String]:
-	var out: Array[String] = [id]
 	var r: Dictionary = _find(id)
 	if r.is_empty():
-		return out
-	var rec: Callable = func(n: ConditionNodeData, again: Callable) -> void:
-		if expanded.has(n.id):
-			for c: ConditionNodeData in n.children:
-				if widgets.has(c.id):
-					out.append(c.id)
-					again.call(c, again)
-	rec.call(r["node"], rec)
-	return out
+		return [id] as Array[String]
+	return GraphLayout.visible_subtree_ids(_layout_ctx(), r["node"])
 
 
 # ============================================================================
@@ -1287,7 +1070,7 @@ func _single_click(node: ConditionNodeData) -> void:
 		spotlight = _compute_spotlight(node.id) if expanded.has(node.id) else null
 		_repaint()
 		_update_inspector()
-		_reveal_rect(_subtree_rect(node))
+		_reveal_rect(GraphLayout.subtree_rect(_layout_ctx(), node))
 	else:
 		selection = {node.id: true}
 		gate_selected = false
@@ -2380,255 +2163,12 @@ func _vec_text(v: Vector2) -> String:
 # ============================================================================
 # Inspector
 # ============================================================================
-func _form_label(p_text: String) -> Label:
-	return skin.tiny_label(p_text.to_upper(), COLORS["faint"], 9)
-
-
-func _form_help(p_text: String) -> Label:
-	var help: Label = Label.new()
-	help.text = p_text
-	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	help.add_theme_font_size_override("font_size", skin.fs(11))
-	help.add_theme_color_override("font_color", COLORS["faint"])
-	return help
-
-
+## Structural-edit landing point for GraphInspector's `committed` signal (and
+## any direct document edits made from this file).
 func _commit_edit() -> void:
 	_mark_pkg_dirty()
 	_build_viewport(true)
 	_update_inspector()
-
-
-func _build_inspector_form(node: ConditionNodeData) -> void:
-	for c: Node in form_box.get_children():
-		form_box.remove_child(c)
-		c.queue_free()
-	match node.kind:
-		"literal":
-			form_box.add_child(_form_label("Value"))
-			var le: LineEdit = LineEdit.new()
-			le.text = node.label
-			skin.style_line_edit(le)
-			le.text_changed.connect(func(t: String) -> void:
-				node.label = t
-				insp_title.text = node.display_label()
-				var w: GraphNodeWidget = widgets.get(node.id)
-				if w:
-					w.refresh()
-				_repaint())
-			le.text_submitted.connect(func(_t: String) -> void: _commit_edit())
-			le.focus_exited.connect(_commit_edit)
-			form_box.add_child(le)
-			form_box.add_child(_form_label("Type"))
-			var ob: OptionButton = OptionButton.new()
-			ob.add_item("float")
-			ob.add_item("int")
-			ob.selected = 1 if node.type == "int" else 0
-			skin.style_option(ob)
-			ob.item_selected.connect(func(i: int) -> void:
-				node.type = "int" if i == 1 else "float"
-				_commit_edit())
-			form_box.add_child(ob)
-		"property":
-			form_box.add_child(_form_label("Tracks variable"))
-			var ob: OptionButton = OptionButton.new()
-			skin.style_option(ob)
-			var by_id: Dictionary = {}
-			var next_id: int = 0
-			var grouped: Dictionary = _variables_by_category()
-			for cat: String in grouped.keys():
-				ob.add_separator(cat)
-				for vn: String in grouped[cat]:
-					ob.add_item("%s - %s" % [vn, _var_type(vn)], next_id)
-					by_id[next_id] = vn
-					if vn == node.label:
-						ob.selected = ob.item_count - 1
-					next_id += 1
-			ob.add_separator("")
-			ob.add_item("+ new variable...", -1)
-			ob.item_selected.connect(func(i: int) -> void:
-				var picked: int = ob.get_item_id(i)
-				if picked < 0:
-					var nm: String = await _prompt("New variable",
-						"Add a test variable to track.", "my_variable")
-					if nm == "":
-						_update_inspector()
-						return
-					if not test_vars.has(nm):
-						test_vars[nm] = AntSchema.default_for(nm)
-					node.label = nm
-					node.type = AntSchema.type_of(nm)
-					_render_vars()
-					_commit_edit()
-					return
-				var chosen: String = by_id[picked]
-				node.label = chosen
-				node.type = AntSchema.type_of(chosen)
-				_commit_edit())
-			form_box.add_child(ob)
-		"compare":
-			form_box.add_child(_form_label("Comparison"))
-			var ob: OptionButton = OptionButton.new()
-			skin.style_option(ob)
-			for i: int in ConditionNodeData.CMP_OPS.size():
-				var op: String = ConditionNodeData.CMP_OPS[i]
-				ob.add_item(ConditionNodeData.op_name(op), i)
-				if op == node.op:
-					ob.selected = i
-			ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.CMP_OPS[i]
-				_commit_edit())
-			form_box.add_child(ob)
-			form_box.add_child(_form_label("Operands"))
-			form_box.add_child(
-				_form_help("Double-click the node to enter and edit its two values."))
-		"logic":
-			form_box.add_child(_form_label("Name"))
-			var le: LineEdit = LineEdit.new()
-			le.text = node.label
-			skin.style_line_edit(le)
-			le.text_changed.connect(func(t: String) -> void:
-				node.label = t
-				insp_title.text = node.display_label()
-				var w: GraphNodeWidget = widgets.get(node.id)
-				if w:
-					w.refresh()
-				_repaint())
-			le.text_submitted.connect(func(_t: String) -> void: _commit_edit())
-			le.focus_exited.connect(_commit_edit)
-			form_box.add_child(le)
-			form_box.add_child(_form_label("Gate"))
-			var ob: OptionButton = OptionButton.new()
-			skin.style_option(ob)
-			for i: int in ConditionNodeData.LOGIC_OPS.size():
-				var op: String = ConditionNodeData.LOGIC_OPS[i]
-				ob.add_item(ConditionNodeData.op_name(op), i)
-				if op == node.op:
-					ob.selected = i
-			ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.LOGIC_OPS[i]
-				node.label = node.op.to_upper()
-				_commit_edit())
-			form_box.add_child(ob)
-		"timing":
-			form_box.add_child(_form_label("Behaviour"))
-			var ob: OptionButton = OptionButton.new()
-			skin.style_option(ob)
-			for i: int in ConditionNodeData.TIMING_OPS.size():
-				var op: String = ConditionNodeData.TIMING_OPS[i]
-				ob.add_item(ConditionNodeData.op_name(op), i)
-				if op == node.op:
-					ob.selected = i
-			ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.TIMING_OPS[i]
-				_commit_edit())
-			form_box.add_child(ob)
-			form_box.add_child(_form_label("Seconds"))
-			var spin: SpinBox = SpinBox.new()
-			spin.min_value = 0.0
-			spin.max_value = 600.0
-			spin.step = 0.1
-			spin.value = node.seconds
-			spin.editable = node.op != "latch"
-			skin.style_spin(spin)
-			spin.value_changed.connect(func(v: float) -> void:
-				node.seconds = maxf(0.0, v)
-				_commit_edit())
-			form_box.add_child(spin)
-			form_box.add_child(
-				_form_help(str(ConditionNodeData.TIMING_HELP.get(node.op, ""))))
-		"query":
-			form_box.add_child(_form_label("Measure"))
-			var measure_ob: OptionButton = OptionButton.new()
-			skin.style_option(measure_ob)
-			for i: int in ConditionNodeData.QUERY_MEASURES.size():
-				var m: String = ConditionNodeData.QUERY_MEASURES[i]
-				measure_ob.add_item(str(ConditionNodeData.MEASURE_WORDS.get(m, m)), i)
-				if m == node.op:
-					measure_ob.selected = i
-			measure_ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.QUERY_MEASURES[i]
-				node.type = node.measure_type()
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(measure_ob)
-			form_box.add_child(_form_label("Subject"))
-			var subject_ob: OptionButton = OptionButton.new()
-			skin.style_option(subject_ob)
-			var subjects: Array = ConditionNodeData.SUBJECT_WORDS.keys()
-			for i: int in subjects.size():
-				var s: String = subjects[i]
-				subject_ob.add_item(str(ConditionNodeData.SUBJECT_WORDS[s]), i)
-				if s == node.subject:
-					subject_ob.selected = i
-			subject_ob.item_selected.connect(func(i: int) -> void:
-				node.subject = subjects[i]
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(subject_ob)
-			form_box.add_child(_form_label("Scope"))
-			var scope_ob: OptionButton = OptionButton.new()
-			skin.style_option(scope_ob)
-			for i: int in ConditionNodeData.QUERY_SCOPES.size():
-				var sc: String = ConditionNodeData.QUERY_SCOPES[i]
-				scope_ob.add_item("%s (%s)" % [
-					ConditionNodeData.SCOPE_WORDS.get(sc, sc),
-					_trim_range(Ant.scope_range(sc))], i)
-				if sc == node.scope:
-					scope_ob.selected = i
-			scope_ob.item_selected.connect(func(i: int) -> void:
-				node.scope = ConditionNodeData.QUERY_SCOPES[i]
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(scope_ob)
-			form_box.add_child(_form_label("Reads variable"))
-			var key_le: LineEdit = LineEdit.new()
-			key_le.text = node.var_key()
-			key_le.editable = false
-			skin.style_line_edit(key_le)
-			key_le.add_theme_color_override("font_uneditable_color", COLORS["faint"])
-			form_box.add_child(key_le)
-		"vector":
-			form_box.add_child(_form_label("Operation"))
-			var ob: OptionButton = OptionButton.new()
-			skin.style_option(ob)
-			for i: int in ConditionNodeData.VECTOR_OPS.size():
-				var vop: String = ConditionNodeData.VECTOR_OPS[i]
-				ob.add_item(ConditionNodeData.VECTOR_NAMES.get(vop, vop), i)
-				if vop == node.op:
-					ob.selected = i
-			ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.VECTOR_OPS[i]
-				node.type = ConditionNodeData.vector_type_of(node.op)
-				_commit_edit())
-			form_box.add_child(ob)
-			if node.op == "const":
-				form_box.add_child(_form_label("Value"))
-				var row: HBoxContainer = HBoxContainer.new()
-				row.add_theme_constant_override("separation", 6)
-				var sx: SpinBox = SpinBox.new()
-				sx.min_value = -9999.0
-				sx.max_value = 9999.0
-				sx.step = 0.1
-				sx.value = node.vec.x
-				skin.style_spin(sx)
-				sx.value_changed.connect(func(v: float) -> void:
-					node.vec.x = v
-					_commit_edit())
-				var sy: SpinBox = SpinBox.new()
-				sy.min_value = -9999.0
-				sy.max_value = 9999.0
-				sy.step = 0.1
-				sy.value = node.vec.y
-				skin.style_spin(sy)
-				sy.value_changed.connect(func(v: float) -> void:
-					node.vec.y = v
-					_commit_edit())
-				row.add_child(sx)
-				row.add_child(sy)
-				form_box.add_child(row)
-			form_box.add_child(
-				_form_help(str(ConditionNodeData.VECTOR_HELP.get(node.op, ""))))
 
 
 func _update_inspector() -> void:
@@ -2654,7 +2194,7 @@ func _update_inspector() -> void:
 		insp_glyph.text = node.glyph()
 		insp_glyph.add_theme_color_override("font_color", COLORS[node.kind])
 		insp_title.text = node.display_label()
-		_build_inspector_form(node)
+		inspector.build_form(node, test_vars)
 	else:
 		insp_empty.visible = false
 		form_box.visible = false
