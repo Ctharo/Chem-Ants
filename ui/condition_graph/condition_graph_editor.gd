@@ -6,6 +6,11 @@ extends Control
 ## on the canvas *unwired* (see [member loose]) - dropped in from the Conditions
 ## library or detached - and only join the tree once the user drags a wire from
 ## their output port into a gate or the Output rail.
+##
+## Interface size ([member ui_scale]) is deliberately local to this editor: the
+## canvas folds it into [member world]'s transform via [method _view_scale] and
+## the chrome re-derives its font sizes, so nothing here touches
+## Window.content_scale_factor and the simulation keeps rendering at 1:1.
 
 const COLORS: Dictionary = {
 	"bg": Color("0a0f14"), "grid": Color(0.47, 0.65, 0.76, 0.055),
@@ -18,9 +23,9 @@ const COLORS: Dictionary = {
 	"vector": Color("7fd7ff"),
 }
 
-#region constants
 ## Reserved key inside a layer's position map holding the output rail's spot.
 const RAIL_KEY: String = "#rail"
+
 const V_GAP: float = 24.0       # vertical gap between sibling subtrees
 const GUTTER: float = 56.0      # left gutter for auto-layout
 const COL_GAP: float = 70.0     # horizontal gap between a parent and its children
@@ -32,29 +37,49 @@ const MIN_ZOOM: float = 0.4
 const MAX_ZOOM: float = 2.0
 const MIN_UI_SCALE: float = 0.75
 const MAX_UI_SCALE: float = 2.5
+const UI_SCALE_STEP: float = 0.05
 ## Height the layout was authored against; used to derive an automatic scale.
 const DESIGN_HEIGHT: float = 900.0
-const EDGE_PAD: float = 24.0     # keep the layer this far off the canvas origin
-const REVEAL_PAD: float = 32.0   # breathing room when scrolling something into view
+## Top bar height at 1.0 interface scale.
+const TOP_BAR_H: float = 60.0
+
+## Keep the layer this far off the canvas origin: nothing left of x = 0 or above
+## y = 0 is reachable, because _clamp_pan() never lets the world scroll positive.
+const EDGE_PAD: float = 24.0
+## Breathing room when scrolling something into view.
+const REVEAL_PAD: float = 32.0
+
+## Floating panels: screen margin, smallest sensible size, and the corner square
+## that acts as the resize grip. The grip matches the panel stylebox's content
+## margin so it sits on the panel itself rather than over a child control.
+const PANEL_EDGE: float = 8.0
+const MIN_PANEL_SIZE: Vector2 = Vector2(180.0, 120.0)
+const RESIZE_GRIP: float = 13.0
+
+## Font sizes the scene hard-codes, by node path. Everything else routes through
+## the _style_*() helpers and picks up the scale automatically.
+const CHROME_FONTS: Dictionary = {
+	"TopBar/HBox/Brand/Eyebrow": 10,
+	"TopBar/HBox/Brand/BehaviorName": 15,
+	"LibraryPanel/VBox/Head/Title": 10,
+	"VarsPanel/VBox/Head/Title": 10,
+	"InspectorPanel/VBox/Head/InspGlyph": 14,
+	"InspectorPanel/VBox/Head/InspTitle": 13,
+	"InspectorPanel/VBox/InspEmpty": 12,
+	"InspectorPanel/VBox/MultiBox/MultiCount": 10,
+	"PkgBar/HBox/PkgLabel": 12,
+	"Toast/ToastLabel": 12,
+	"ModalLayer/Center/ModalPanel/VBox/ModalTitle": 15,
+	"ModalLayer/Center/ModalPanel/VBox/ModalDesc": 12,
+}
+
 ## Payload tag for library -> canvas drag and drop.
 const DRAG_CONDITION: String = "chem_ants/condition_group"
-const UI_SCALE_STEP: float = 0.05
 
-#endregion
+enum DragMode { NONE, NODE_PENDING, NODE, MARQUEE_PENDING, MARQUEE, PAN, WIRE,
+	PANEL, PANEL_RESIZE }
 
-
-
-enum DragMode { NONE, NODE_PENDING, NODE, MARQUEE_PENDING, MARQUEE, PAN, WIRE, PANEL }
-
-const PANEL_EDGE: float = 8.0
-var drag_panel: PanelContainer = null
-var panel_grab: Vector2 = Vector2.ZERO
-## instance id -> true, for panels that have been detached from their anchors.
-var free_panels: Dictionary = {}
-## Set by an expand/collapse so the next rebuild is allowed to push subtrees
-## apart. Plain rebuilds leave hand-placed cards exactly where they are.
-var _needs_room: bool = false
-#region document state
+# --- document state ---------------------------------------------------------
 var behavior_title: String = "Engage Target"
 var tree_root: ConditionNodeData
 var path: Array[ConditionNodeData] = []
@@ -68,26 +93,29 @@ var expanded_by_layer: Dictionary = {}  # layer id -> {node id: true}
 var prev_visible: Dictionary = {}       # id -> true
 var spotlight: Variant = null           # null | Dictionary id -> true
 var positions: Dictionary = {}          # layer id -> {node id: Vector2}
+## layer id -> Array[ConditionNodeData]: roots parked on the canvas but not
+## feeding anything yet.
 var loose: Dictionary = {}
 var test_vars: Dictionary = {}
 var clipboard: Array[ConditionNodeData] = []
 var groups: Array[Dictionary] = []      # {"id", "name", "root": ConditionNodeData}
 var dirty_pkg: Variant = null           # null | {"node", "group"}
 var zoom: float = 1.0
+## Interface size for this editor only. Multiplies into the canvas transform and
+## every chrome font size; never leaves this scene.
+var ui_scale: float = 1.0
 var content_size: Vector2 = Vector2(100, 100)
 ## True while any timing node exists, which puts the editor into live ticking.
 var live: bool = false
-#endregion
 
-#region render state
+# --- render state -----------------------------------------------------------
 var widgets: Dictionary = {}            # id -> GraphNodeWidget
 var node_pos: Dictionary = {}           # id -> Vector2 (layout target positions)
 var visible_nodes: Array[ConditionNodeData] = []
 var parent_of: Dictionary = {}          # id -> ConditionNodeData (null = unwired root)
 var ui_font: Font
-#endregion
 
-#region interaction state
+# --- interaction state ------------------------------------------------------
 var drag_mode: DragMode = DragMode.NONE
 var drag_widget: GraphNodeWidget = null
 var drag_button: MouseButton = MOUSE_BUTTON_LEFT
@@ -103,10 +131,17 @@ var wire_dir: String = "out"
 var wire_from: Vector2 = Vector2.ZERO
 var marquee_add: bool = false
 var marquee_base: Dictionary = {}
+## Set by an expand/collapse so the next rebuild is allowed to push subtrees
+## apart. Plain rebuilds leave hand-placed cards exactly where they are.
+var _needs_room: bool = false
+var drag_panel: PanelContainer = null
+var panel_grab: Vector2 = Vector2.ZERO
+var panel_start_size: Vector2 = Vector2.ZERO
+## instance id -> true, for panels detached from their scene anchors.
+var free_panels: Dictionary = {}
 var _click_token: int = 0
 var _nav_tween: Tween = null
 var _boot_done: bool = false
-#endregion
 
 
 signal _modal_done(text: String)
@@ -122,6 +157,8 @@ signal _modal_done(text: String)
 @onready var zoom_out_btn: Button = %ZoomOut
 @onready var zoom_label_btn: Button = %ZoomLabel
 @onready var zoom_in_btn: Button = %ZoomIn
+@onready var ui_scale_slider: HSlider = %UiScale
+@onready var ui_scale_label: Label = %UiScaleLabel
 @onready var arrange_btn: Button = %ArrangeBtn
 @onready var cond_btn: Button = %CondBtn
 @onready var vars_btn: Button = %VarsBtn
@@ -160,14 +197,9 @@ signal _modal_done(text: String)
 @onready var modal_input: LineEdit = %ModalInput
 @onready var modal_cancel: Button = %ModalCancel
 @onready var modal_save: Button = %ModalSave
-@onready var ui_scale_slider: HSlider = %UiScale
-@onready var ui_scale_label: Label = %UiScaleLabel
 
 var rail: OutputRailWidget = null
 var _toast_tween: Tween = null
-var ui_scale: float = 1.0
-
-
 
 # ============================================================================
 # Lifecycle
@@ -183,8 +215,13 @@ func _ready() -> void:
 	expanded = _layer_expansion(tree_root.id)
 
 	_load_library()
+	# Interface size is settled before the first style pass so nothing is laid
+	# out twice on boot.
+	_setup_ui_scale()
 	_apply_styles()
 	_connect_chrome()
+	_place_back_button()
+	_setup_movable_panels()
 	rail = OutputRailWidget.new(COLORS, ui_font)
 	var _rc: int = rail.rail_clicked.connect(_on_rail_clicked)
 	var _rp: int = rail.rail_port_pressed.connect(_on_rail_port_pressed)
@@ -192,26 +229,14 @@ func _ready() -> void:
 	world.move_child(rail, world.get_child_count() - 1)
 	behavior_label.text = behavior_title
 	var _gd: int = grid_layer.draw.connect(_draw_grid)
+	var _rs: int = resized.connect(_on_editor_resized)
 
-	resized.connect(_on_editor_resized)
 	_boot_done = true
-	_place_back_button()
-	_setup_movable_panels()
-	_setup_ui_scale()
 	call_deferred("_render_all")
 
-func _on_editor_resized() -> void:
-	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
-		_clamp_panel(p)
-## Back reads as "up out of here", so it belongs immediately left of the trail
-## it walks back along, not stranded at the far end of the toolbar.
-func _place_back_button() -> void:
-	var bar: HBoxContainer = back_btn.get_parent() as HBoxContainer
-	if bar == null:
-		return
-	bar.move_child(back_btn, crumbs_box.get_index())
+
 func _check_glyph_coverage() -> void:
-	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7\u2220\u2212\u21bb\u00fb\u03b8\u00b7"	
+	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7\u2220\u2212\u21bb\u00fb\u03b8\u00b7"
 	for i: int in needed.length():
 		if not ui_font.has_char(needed.unicode_at(i)):
 			ConditionNodeData.ascii_mode = true
@@ -267,6 +292,63 @@ func _persist_library() -> void:
 
 
 # ============================================================================
+# Interface size
+#
+# Two halves: the canvas folds ui_scale into world's transform (see
+# _view_scale()), and the chrome re-derives font sizes and margins through
+# _fs()/_px() so text stays crisply rasterised rather than magnified.
+# ============================================================================
+func _setup_ui_scale() -> void:
+	ui_scale_slider.min_value = MIN_UI_SCALE
+	ui_scale_slider.max_value = MAX_UI_SCALE
+	ui_scale_slider.step = UI_SCALE_STEP
+	ui_scale_slider.focus_mode = Control.FOCUS_NONE
+	ui_scale_slider.tooltip_text = "Interface size"
+	ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
+	ui_scale = _auto_ui_scale()
+	ui_scale_slider.set_value_no_signal(ui_scale)
+	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
+
+
+## Starting point on a fresh launch: match the height the layout was authored at.
+func _auto_ui_scale() -> float:
+	return clampf(float(get_window().size.y) / DESIGN_HEIGHT, MIN_UI_SCALE, MAX_UI_SCALE)
+
+
+func _on_ui_scale_changed(value: float) -> void:
+	_set_ui_scale(value)
+
+
+func _set_ui_scale(value: float) -> void:
+	ui_scale = clampf(snappedf(value, UI_SCALE_STEP), MIN_UI_SCALE, MAX_UI_SCALE)
+	ui_scale_slider.set_value_no_signal(ui_scale)
+	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
+	_apply_styles()
+	_apply_zoom()
+	_render_library()
+	_render_vars()
+	_update_inspector()
+	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
+		_clamp_panel(p)
+
+
+## Canvas magnification: user zoom times interface scale. Anything converting
+## between stage and world space uses this, never `zoom` on its own.
+func _view_scale() -> float:
+	return zoom * ui_scale
+
+
+## Font size authored at 1.0, scaled for the current interface size.
+func _fs(base: int) -> int:
+	return maxi(1, roundi(float(base) * ui_scale))
+
+
+## Pixel distance authored at 1.0, scaled for the current interface size.
+func _px(base: float) -> float:
+	return base * ui_scale
+
+
+# ============================================================================
 # Styling helpers
 # ============================================================================
 func _panel_style(bg: Color, border: Color, radius: int = 13, margin: int = 13) -> StyleBoxFlat:
@@ -274,8 +356,8 @@ func _panel_style(bg: Color, border: Color, radius: int = 13, margin: int = 13) 
 	sb.bg_color = bg
 	sb.border_color = border
 	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(radius)
-	sb.set_content_margin_all(margin)
+	sb.set_corner_radius_all(roundi(_px(float(radius))))
+	sb.set_content_margin_all(_px(float(margin)))
 	sb.shadow_color = Color(0, 0, 0, 0.5)
 	sb.shadow_size = 14
 	sb.shadow_offset = Vector2(0, 8)
@@ -284,12 +366,12 @@ func _panel_style(bg: Color, border: Color, radius: int = 13, margin: int = 13) 
 
 func _style_button(btn: Button, kind: String = "normal") -> void:
 	var normal: StyleBoxFlat = StyleBoxFlat.new()
-	normal.set_corner_radius_all(8)
+	normal.set_corner_radius_all(roundi(_px(8.0)))
 	normal.set_border_width_all(1)
-	normal.content_margin_left = 11
-	normal.content_margin_right = 11
-	normal.content_margin_top = 7
-	normal.content_margin_bottom = 7
+	normal.content_margin_left = _px(11.0)
+	normal.content_margin_right = _px(11.0)
+	normal.content_margin_top = _px(7.0)
+	normal.content_margin_bottom = _px(7.0)
 	match kind:
 		"primary":
 			normal.bg_color = COLORS["sel"]
@@ -329,7 +411,7 @@ func _style_button(btn: Button, kind: String = "normal") -> void:
 	disabled.bg_color = Color(normal.bg_color, 0.35)
 	btn.add_theme_stylebox_override("disabled", disabled)
 	btn.add_theme_color_override("font_disabled_color", COLORS["faint"])
-	btn.add_theme_font_size_override("font_size", 12)
+	btn.add_theme_font_size_override("font_size", _fs(12))
 	btn.focus_mode = Control.FOCUS_NONE
 
 
@@ -338,19 +420,19 @@ func _style_line_edit(le: LineEdit) -> void:
 	sb.bg_color = COLORS["panel"]
 	sb.border_color = COLORS["line"]
 	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(8)
-	sb.set_content_margin_all(9)
+	sb.set_corner_radius_all(roundi(_px(8.0)))
+	sb.set_content_margin_all(_px(9.0))
 	var focus: StyleBoxFlat = sb.duplicate()
 	focus.border_color = COLORS["sel"]
 	le.add_theme_stylebox_override("normal", sb)
 	le.add_theme_stylebox_override("focus", focus)
 	le.add_theme_color_override("font_color", COLORS["text"])
-	le.add_theme_font_size_override("font_size", 13)
+	le.add_theme_font_size_override("font_size", _fs(13))
 
 
 func _style_spin(spin: SpinBox) -> void:
 	_style_line_edit(spin.get_line_edit())
-	spin.add_theme_font_size_override("font_size", 13)
+	spin.add_theme_font_size_override("font_size", _fs(13))
 
 
 static func _trim_range(v: float) -> String:
@@ -359,13 +441,13 @@ static func _trim_range(v: float) -> String:
 
 func _style_option(ob: OptionButton) -> void:
 	_style_button(ob)
-	ob.add_theme_font_size_override("font_size", 13)
+	ob.add_theme_font_size_override("font_size", _fs(13))
 
 
 func _tiny_label(p_text: String, p_color: Color, font_size: int = 9) -> Label:
 	var l: Label = Label.new()
 	l.text = p_text
-	l.add_theme_font_size_override("font_size", font_size)
+	l.add_theme_font_size_override("font_size", _fs(font_size))
 	l.add_theme_color_override("font_color", p_color)
 	return l
 
@@ -375,10 +457,10 @@ func _apply_styles() -> void:
 	top_sb.bg_color = COLORS["panel"]
 	top_sb.border_width_bottom = 1
 	top_sb.border_color = COLORS["line"]
-	top_sb.content_margin_left = 16
-	top_sb.content_margin_right = 16
-	top_sb.content_margin_top = 8
-	top_sb.content_margin_bottom = 8
+	top_sb.content_margin_left = _px(16.0)
+	top_sb.content_margin_right = _px(16.0)
+	top_sb.content_margin_top = _px(8.0)
+	top_sb.content_margin_bottom = _px(8.0)
 	($TopBar as PanelContainer).add_theme_stylebox_override("panel", top_sb)
 
 	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
@@ -405,18 +487,35 @@ func _apply_styles() -> void:
 	back_btn.text = ("\u2190 Back" if not ConditionNodeData.ascii_mode else "< Back")
 
 	# Legend swatches.
+	for c: Node in legend_box.get_children():
+		legend_box.remove_child(c)
+		c.queue_free()
 	for entry: Array in [["logic", "logic"], ["compare", "compare"],
 			["timing", "timing"], ["query", "sense"],
 			["property", "prop"], ["literal", "const"]]:
 		var h: HBoxContainer = HBoxContainer.new()
 		h.add_theme_constant_override("separation", 5)
 		var sw: ColorRect = ColorRect.new()
-		sw.custom_minimum_size = Vector2(9, 9)
+		sw.custom_minimum_size = Vector2(_px(9.0), _px(9.0))
 		sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		sw.color = COLORS[entry[0]]
 		h.add_child(sw)
 		h.add_child(_tiny_label(entry[1], COLORS["dim"], 10))
 		legend_box.add_child(h)
+
+	_scale_chrome()
+
+
+## Everything the scene hard-codes rather than routing through _style_*().
+func _scale_chrome() -> void:
+	for node_path: String in CHROME_FONTS.keys():
+		var lab: Label = get_node_or_null(node_path) as Label
+		if lab != null:
+			lab.add_theme_font_size_override("font_size", _fs(int(CHROME_FONTS[node_path])))
+	var bar_h: float = _px(TOP_BAR_H)
+	($TopBar as PanelContainer).offset_bottom = bar_h
+	stage.offset_top = bar_h
+	ui_scale_slider.custom_minimum_size = Vector2(_px(96.0), 0.0)
 
 
 func _connect_chrome() -> void:
@@ -452,6 +551,16 @@ func _connect_chrome() -> void:
 			_modal_done.emit(""))
 
 
+## Back reads as "up out of here", so it belongs immediately left of the trail
+## it walks back along rather than stranded at the far end of the toolbar.
+## Done in code because _draw_crumbs() rebuilds the crumb box every navigation.
+func _place_back_button() -> void:
+	var bar: HBoxContainer = back_btn.get_parent() as HBoxContainer
+	if bar == null:
+		return
+	bar.move_child(back_btn, crumbs_box.get_index())
+
+
 func _draw_grid() -> void:
 	var s: Vector2 = grid_layer.size
 	var step: float = 34.0
@@ -463,6 +572,102 @@ func _draw_grid() -> void:
 	while y < s.y:
 		grid_layer.draw_line(Vector2(0, y), Vector2(s.x, y), COLORS["grid"], 1.0)
 		y += step
+
+
+# ============================================================================
+# Floating panels: move by the header, resize from the bottom-right corner
+# ============================================================================
+func _setup_movable_panels() -> void:
+	var specs: Array = [
+		{"panel": library_panel, "head": "VBox/Head", "fill": "VBox/GroupScroll"},
+		{"panel": vars_panel, "head": "VBox/Head", "fill": "VBox/VarsScroll"},
+		{"panel": inspector_panel, "head": "VBox/Head", "fill": ""},
+	]
+	for spec: Dictionary in specs:
+		var panel: PanelContainer = spec["panel"]
+		var handle: HBoxContainer = panel.get_node(str(spec["head"])) as HBoxContainer
+		handle.mouse_filter = Control.MOUSE_FILTER_STOP
+		handle.tooltip_text = "Drag to move; drag the bottom-right corner to resize"
+		for child: Node in handle.get_children():
+			var lab: Label = child as Label
+			if lab != null:
+				lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		handle.gui_input.connect(_on_panel_handle_input.bind(panel))
+		panel.gui_input.connect(_on_panel_gui_input.bind(panel))
+		# Let the panel's height drive the scroll area instead of the reverse,
+		# otherwise a hand-set height fights the scroller's minimum.
+		var fill_path: String = str(spec["fill"])
+		if fill_path != "":
+			var fill: Control = panel.get_node(fill_path) as Control
+			fill.custom_minimum_size = Vector2.ZERO
+			fill.size_flags_vertical = Control.SIZE_EXPAND_FILL
+
+
+func _on_panel_handle_input(event: InputEvent, panel: PanelContainer) -> void:
+	var mb: InputEventMouseButton = event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if drag_mode != DragMode.NONE:
+		return
+	_float_panel(panel)
+	panel.move_to_front()
+	drag_mode = DragMode.PANEL
+	drag_button = MOUSE_BUTTON_LEFT
+	drag_panel = panel
+	panel_grab = panel.global_position - get_global_mouse_position()
+	get_viewport().set_input_as_handled()
+
+
+func _on_panel_gui_input(event: InputEvent, panel: PanelContainer) -> void:
+	var grip: float = _px(RESIZE_GRIP)
+	var corner: Rect2 = Rect2(panel.size - Vector2(grip, grip), Vector2(grip, grip))
+	var mm: InputEventMouseMotion = event as InputEventMouseMotion
+	if mm != null:
+		if drag_mode == DragMode.NONE:
+			panel.mouse_default_cursor_shape = (Control.CURSOR_FDIAGSIZE
+				if corner.has_point(mm.position) else Control.CURSOR_ARROW)
+		return
+	var mb: InputEventMouseButton = event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if drag_mode != DragMode.NONE or not corner.has_point(mb.position):
+		return
+	_float_panel(panel)
+	panel.move_to_front()
+	drag_mode = DragMode.PANEL_RESIZE
+	drag_button = MOUSE_BUTTON_LEFT
+	drag_panel = panel
+	drag_start_screen = get_global_mouse_position()
+	panel_start_size = panel.size
+	get_viewport().set_input_as_handled()
+
+
+## Detach a panel from its scene anchors the first time it is touched, keeping
+## exactly the rect it already occupied.
+func _float_panel(panel: PanelContainer) -> void:
+	var key: int = panel.get_instance_id()
+	if free_panels.has(key):
+		return
+	var here: Vector2 = panel.position
+	var box: Vector2 = panel.size
+	panel.set_anchors_preset(Control.PRESET_TOP_LEFT, false)
+	panel.position = here
+	panel.size = box
+	free_panels[key] = true
+
+
+func _clamp_panel(panel: PanelContainer) -> void:
+	if not free_panels.has(panel.get_instance_id()):
+		return
+	var lim: Vector2 = size - panel.size
+	panel.position = Vector2(
+		clampf(panel.position.x, PANEL_EDGE, maxf(PANEL_EDGE, lim.x - PANEL_EDGE)),
+		clampf(panel.position.y, PANEL_EDGE, maxf(PANEL_EDGE, lim.y - PANEL_EDGE)))
+
+
+func _on_editor_resized() -> void:
+	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
+		_clamp_panel(p)
 
 
 # ============================================================================
@@ -581,7 +786,7 @@ func _draw_crumbs() -> void:
 		b.text = p_text
 		b.disabled = current
 		_style_button(b, "flat" if not current else "normal")
-		b.add_theme_font_size_override("font_size", 12)
+		b.add_theme_font_size_override("font_size", _fs(12))
 		if current:
 			b.add_theme_color_override("font_disabled_color", COLORS["text"])
 		else:
@@ -675,9 +880,8 @@ func _build_viewport(skip_anim: bool = false) -> void:
 		_place_tree(c, 0.0, 0.0)
 	for n: ConditionNodeData in loose_roots:
 		_place_tree(n, 0.0, 0.0)
-	for n: ConditionNodeData in loose_roots:
-		_place_tree(n, 0.0, 0.0)
 	_make_room(f, loose_roots)
+
 	# Extents. The rail follows the wired tree only, so dropping a card off to
 	# the right doesn't drag the output with it.
 	var lp: Dictionary = _layer_positions()
@@ -736,120 +940,6 @@ func _build_viewport(skip_anim: bool = false) -> void:
 		prev_visible[n.id] = true
 	_repaint()
 
-## Keep an expansion legible: push overlapping subtrees apart, then shove the
-## whole layer back inside the canvas if it grew off the left or top edge.
-## Results are written to the layer store, so the shuffle is permanent.
-func _make_room(f: ConditionNodeData, loose_roots: Array[ConditionNodeData]) -> void:
-	var tops: Array[ConditionNodeData] = []
-	for c: ConditionNodeData in f.children:
-		tops.append(c)
-	for n: ConditionNodeData in loose_roots:
-		tops.append(n)
-	if tops.is_empty():
-		return
-	if _needs_room:
-		_needs_room = false
-		_separate_subtrees(tops)
-	_shift_into_canvas()
-
-
-## Bounding box of everything currently drawn for this root.
-func _subtree_rect(n: ConditionNodeData) -> Rect2:
-	var out: Rect2 = Rect2()
-	var started: bool = false
-	for sid: String in _visible_subtree_ids(n.id):
-		if not node_pos.has(sid) or not widgets.has(sid):
-			continue
-		var box: Rect2 = Rect2(node_pos[sid], (widgets[sid] as GraphNodeWidget).size)
-		if started:
-			out = out.merge(box)
-		else:
-			out = box
-			started = true
-	return out
-
-
-func _shift_subtree(n: ConditionNodeData, delta: Vector2) -> void:
-	if delta.is_zero_approx():
-		return
-	var lp: Dictionary = _layer_positions()
-	for sid: String in _visible_subtree_ids(n.id):
-		if node_pos.has(sid):
-			node_pos[sid] = (node_pos[sid] as Vector2) + delta
-		if lp.has(sid):
-			lp[sid] = (lp[sid] as Vector2) + delta
-
-
-## Top-down sweep: each subtree drops below anything it collides with.
-func _separate_subtrees(tops: Array[ConditionNodeData]) -> void:
-	var order: Array[ConditionNodeData] = tops.duplicate()
-	order.sort_custom(func(a: ConditionNodeData, b: ConditionNodeData) -> bool:
-		return _subtree_rect(a).position.y < _subtree_rect(b).position.y)
-	var taken: Array[Rect2] = []
-	for n: ConditionNodeData in order:
-		var box: Rect2 = _subtree_rect(n)
-		if box.size.y <= 0.0:
-			continue
-		var start_y: float = box.position.y
-		var moved: bool = true
-		var guard: int = 0
-		while moved and guard < 8:
-			moved = false
-			guard += 1
-			for other: Rect2 in taken:
-				if box.intersects(other):
-					box.position.y = other.end.y + V_GAP
-					moved = true
-		_shift_subtree(n, Vector2(0.0, box.position.y - start_y))
-		taken.append(box)
-
-
-## The canvas can grow right and down on its own, but nothing left of x = 0 is
-## reachable, so the layer moves instead.
-func _shift_into_canvas() -> void:
-	var min_l: float = INF
-	var min_t: float = INF
-	for n: ConditionNodeData in visible_nodes:
-		if not node_pos.has(n.id):
-			continue
-		var p: Vector2 = node_pos[n.id]
-		min_l = minf(min_l, p.x)
-		min_t = minf(min_t, p.y)
-	if min_l == INF:
-		return
-	var delta: Vector2 = Vector2(maxf(0.0, EDGE_PAD - min_l), maxf(0.0, EDGE_PAD - min_t))
-	if delta.is_zero_approx():
-		return
-	var lp: Dictionary = _layer_positions()
-	for key: String in lp.keys():
-		lp[key] = (lp[key] as Vector2) + delta
-	for nid: String in node_pos.keys():
-		node_pos[nid] = (node_pos[nid] as Vector2) + delta
-
-
-## Pan the stage until `area` (world space) is on screen.
-func _reveal_rect(area: Rect2) -> void:
-	if area.size.x <= 0.0 or area.size.y <= 0.0:
-		return
-	var view_pos: Vector2 = -world.position / zoom
-	var view_size: Vector2 = stage.size / zoom
-	var target: Vector2 = world.position
-	if area.position.x - REVEAL_PAD < view_pos.x:
-		target.x += (view_pos.x - area.position.x + REVEAL_PAD) * zoom
-	elif area.end.x + REVEAL_PAD > view_pos.x + view_size.x:
-		target.x -= (area.end.x + REVEAL_PAD - view_pos.x - view_size.x) * zoom
-	if area.position.y - REVEAL_PAD < view_pos.y:
-		target.y += (view_pos.y - area.position.y + REVEAL_PAD) * zoom
-	elif area.end.y + REVEAL_PAD > view_pos.y + view_size.y:
-		target.y -= (area.end.y + REVEAL_PAD - view_pos.y - view_size.y) * zoom
-	var lim: Vector2 = stage.size - content_size * zoom
-	target.x = clampf(target.x, minf(0.0, lim.x), 0.0)
-	target.y = clampf(target.y, minf(0.0, lim.y), 0.0)
-	if target.is_equal_approx(world.position):
-		return
-	var tw: Tween = create_tween()
-	tw.tween_property(world, "position", target, 0.28) \
-		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 
 ## Give every top-level card a stored position. An empty layer gets the full
 ## tidy tree layout; a layer that already has positions only places newcomers,
@@ -949,23 +1039,144 @@ func _nudge_subtree_into_view(root_node: ConditionNodeData) -> void:
 			node_pos[sid].x += d
 
 
+# ---- keeping an expansion on screen ----------------------------------------
+## Children fan out to the *left* of their parent, so expanding a deep gate can
+## push cards past x = 0 (unreachable) and can grow a subtree straight through
+## its siblings. This runs after placement and fixes both, writing results back
+## to the layer store so the shuffle is permanent rather than cosmetic.
+func _make_room(f: ConditionNodeData, loose_roots: Array[ConditionNodeData]) -> void:
+	var tops: Array[ConditionNodeData] = []
+	for c: ConditionNodeData in f.children:
+		tops.append(c)
+	for n: ConditionNodeData in loose_roots:
+		tops.append(n)
+	if tops.is_empty():
+		return
+	if _needs_room:
+		_needs_room = false
+		_separate_subtrees(tops)
+	_shift_into_canvas()
+
+
+## Bounding box of everything currently drawn for this root.
+func _subtree_rect(n: ConditionNodeData) -> Rect2:
+	var out: Rect2 = Rect2()
+	var started: bool = false
+	for sid: String in _visible_subtree_ids(n.id):
+		if not node_pos.has(sid) or not widgets.has(sid):
+			continue
+		var box: Rect2 = Rect2(node_pos[sid], (widgets[sid] as GraphNodeWidget).size)
+		if started:
+			out = out.merge(box)
+		else:
+			out = box
+			started = true
+	return out
+
+
+func _shift_subtree(n: ConditionNodeData, delta: Vector2) -> void:
+	if delta.is_zero_approx():
+		return
+	var lp: Dictionary = _layer_positions()
+	for sid: String in _visible_subtree_ids(n.id):
+		if node_pos.has(sid):
+			node_pos[sid] = (node_pos[sid] as Vector2) + delta
+		if lp.has(sid):
+			lp[sid] = (lp[sid] as Vector2) + delta
+
+
+## Top-down sweep: each subtree drops below anything it collides with.
+func _separate_subtrees(tops: Array[ConditionNodeData]) -> void:
+	var order: Array[ConditionNodeData] = tops.duplicate()
+	order.sort_custom(func(a: ConditionNodeData, b: ConditionNodeData) -> bool:
+		return _subtree_rect(a).position.y < _subtree_rect(b).position.y)
+	var taken: Array[Rect2] = []
+	for n: ConditionNodeData in order:
+		var box: Rect2 = _subtree_rect(n)
+		if box.size.y <= 0.0:
+			continue
+		var start_y: float = box.position.y
+		var moved: bool = true
+		var guard: int = 0
+		while moved and guard < 8:
+			moved = false
+			guard += 1
+			for other: Rect2 in taken:
+				if box.intersects(other):
+					box.position.y = other.end.y + V_GAP
+					moved = true
+		_shift_subtree(n, Vector2(0.0, box.position.y - start_y))
+		taken.append(box)
+
+
+## The canvas grows right and down on its own, but _clamp_pan() never scrolls
+## positive, so anything at negative coordinates is unreachable. Move the layer
+## instead of the view.
+func _shift_into_canvas() -> void:
+	var min_l: float = INF
+	var min_t: float = INF
+	for n: ConditionNodeData in visible_nodes:
+		if not node_pos.has(n.id):
+			continue
+		var p: Vector2 = node_pos[n.id]
+		min_l = minf(min_l, p.x)
+		min_t = minf(min_t, p.y)
+	if min_l == INF:
+		return
+	var delta: Vector2 = Vector2(maxf(0.0, EDGE_PAD - min_l), maxf(0.0, EDGE_PAD - min_t))
+	if delta.is_zero_approx():
+		return
+	var lp: Dictionary = _layer_positions()
+	for key: String in lp.keys():
+		lp[key] = (lp[key] as Vector2) + delta
+	for nid: String in node_pos.keys():
+		node_pos[nid] = (node_pos[nid] as Vector2) + delta
+
+
+## Pan the stage until `area` (world space) is on screen.
+func _reveal_rect(area: Rect2) -> void:
+	if area.size.x <= 0.0 or area.size.y <= 0.0:
+		return
+	var vs: float = _view_scale()
+	var view_pos: Vector2 = -world.position / vs
+	var view_size: Vector2 = stage.size / vs
+	var target: Vector2 = world.position
+	if area.position.x - REVEAL_PAD < view_pos.x:
+		target.x += (view_pos.x - area.position.x + REVEAL_PAD) * vs
+	elif area.end.x + REVEAL_PAD > view_pos.x + view_size.x:
+		target.x -= (area.end.x + REVEAL_PAD - view_pos.x - view_size.x) * vs
+	if area.position.y - REVEAL_PAD < view_pos.y:
+		target.y += (view_pos.y - area.position.y + REVEAL_PAD) * vs
+	elif area.end.y + REVEAL_PAD > view_pos.y + view_size.y:
+		target.y -= (area.end.y + REVEAL_PAD - view_pos.y - view_size.y) * vs
+	var lim: Vector2 = stage.size - content_size * vs
+	target.x = clampf(target.x, minf(0.0, lim.x), 0.0)
+	target.y = clampf(target.y, minf(0.0, lim.y), 0.0)
+	if target.is_equal_approx(world.position):
+		return
+	var tw: Tween = create_tween()
+	tw.tween_property(world, "position", target, 0.28) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
+
+
 func _apply_zoom() -> void:
-	world.scale = Vector2(zoom, zoom)
+	var vs: float = _view_scale()
+	world.scale = Vector2(vs, vs)
 	_clamp_pan()
 	zoom_label_btn.text = "%d%%" % roundi(zoom * 100.0)
 
 
 func _clamp_pan() -> void:
-	var lim: Vector2 = stage.size - content_size * zoom
+	var lim: Vector2 = stage.size - content_size * _view_scale()
 	world.position.x = clampf(world.position.x, minf(0.0, lim.x), 0.0)
 	world.position.y = clampf(world.position.y, minf(0.0, lim.y), 0.0)
 
 
 func _set_zoom(nz: float, stage_point: Variant = null) -> void:
 	var sp: Vector2 = stage_point if stage_point != null else stage.size * 0.5
-	var wp: Vector2 = (sp - world.position) / zoom
+	var wp: Vector2 = (sp - world.position) / _view_scale()
 	zoom = clampf(nz, MIN_ZOOM, MAX_ZOOM)
-	world.position = sp - wp * zoom
+	world.position = sp - wp * _view_scale()
 	_apply_zoom()
 
 
@@ -1028,7 +1239,7 @@ func _repaint(delta: float = 0.0) -> void:
 		if r["is_bool"]:
 			w.eval_state = r["value"]
 			w.value_text = "?" if r["value"] == null else ("true" if r["value"] else "false")
-		else:
+		else: #FIXME Breaks for Vector
 			w.eval_state = null
 			var v: float = r["value"]
 			w.value_text = str(roundi(v)) if n.type == "int" else str(v)
@@ -1071,6 +1282,7 @@ func _repaint(delta: float = 0.0) -> void:
 	rail.out_state = gr["value"] if gr["is_bool"] else null
 	rail.selected = gate_selected
 	rail.queue_redraw()
+
 
 # ============================================================================
 # Spotlight / expansion helpers
@@ -1196,10 +1408,12 @@ func _single_click(node: ConditionNodeData) -> void:
 			_set_expansion(nxt)
 		selection = {node.id: true}
 		gate_selected = false
+		_needs_room = true
 		_build_viewport(false)
 		spotlight = _compute_spotlight(node.id) if expanded.has(node.id) else null
 		_repaint()
 		_update_inspector()
+		_reveal_rect(_subtree_rect(node))
 	else:
 		selection = {node.id: true}
 		gate_selected = false
@@ -1405,6 +1619,15 @@ func _drag_motion() -> void:
 			if drag_panel != null:
 				drag_panel.global_position = gp + panel_grab
 				_clamp_panel(drag_panel)
+		DragMode.PANEL_RESIZE:
+			if drag_panel != null:
+				var want: Vector2 = panel_start_size + (gp - drag_start_screen)
+				drag_panel.custom_minimum_size = Vector2(
+					maxf(want.x, _px(MIN_PANEL_SIZE.x)),
+					maxf(want.y, _px(MIN_PANEL_SIZE.y)))
+				drag_panel.size = drag_panel.custom_minimum_size
+				_clamp_panel(drag_panel)
+
 
 func _drag_release() -> void:
 	var mode: DragMode = drag_mode
@@ -1428,8 +1651,10 @@ func _drag_release() -> void:
 		DragMode.WIRE:
 			trace_layer.set_preview(false)
 			_finish_wire()
-		DragMode.PANEL:
+		DragMode.PANEL, DragMode.PANEL_RESIZE:
 			drag_panel = null
+
+
 # ============================================================================
 # Wiring
 # ============================================================================
@@ -1632,17 +1857,18 @@ func _go_to(i: int) -> void:
 func _run_nav_anim(entering: bool, origin: Variant) -> void:
 	if _nav_tween:
 		_nav_tween.kill()
+	var vs: float = _view_scale()
 	world.pivot_offset = origin if origin != null else content_size * 0.5
-	var start: float = zoom * (0.5 if entering else 1.32)
+	var start: float = vs * (0.5 if entering else 1.32)
 	world.scale = Vector2(start, start)
 	world.modulate.a = 0.15
 	_nav_tween = create_tween().set_parallel(true)
-	_nav_tween.tween_property(world, "scale", Vector2(zoom, zoom), 0.34) \
+	_nav_tween.tween_property(world, "scale", Vector2(vs, vs), 0.34) \
 		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 	_nav_tween.tween_property(world, "modulate:a", 1.0, 0.34)
 	_nav_tween.chain().tween_callback(func() -> void:
 		world.pivot_offset = Vector2.ZERO
-		world.scale = Vector2(zoom, zoom)
+		world.scale = Vector2(vs, vs)
 		_clamp_pan())
 
 
@@ -1868,7 +2094,7 @@ func _render_library() -> void:
 		var l: Label = Label.new()
 		l.text = "Select nodes (add the Output rail for the gate), then \"Save as condition\". Saved conditions are dragged onto the canvas to reuse."
 		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.add_theme_font_size_override("font_size", 11)
+		l.add_theme_font_size_override("font_size", _fs(11))
 		l.add_theme_color_override("font_color", COLORS["faint"])
 		group_list.add_child(l)
 		return
@@ -1991,7 +2217,7 @@ func _swatch_icon(p_color: Color) -> ImageTexture:
 ##   "disabled": bool, "icon": Texture2D, "sep": bool, "title": String
 func _show_menu(items: Array) -> void:
 	var pm: PopupMenu = PopupMenu.new()
-	pm.add_theme_font_size_override("font_size", 12)
+	pm.add_theme_font_size_override("font_size", _fs(12))
 	var actions: Array[Callable] = []
 	for it: Dictionary in items:
 		if it.get("sep", false):
@@ -2122,6 +2348,7 @@ func _var_type(p_name: String) -> String:
 		return "vector"
 	return "float"
 
+
 ## Variable names grouped by schema category, in a stable display order.
 func _variables_by_category() -> Dictionary:
 	var by_cat: Dictionary = {}
@@ -2198,7 +2425,7 @@ func _build_var_row(var_name: String) -> Control:
 		var cb: CheckButton = CheckButton.new()
 		cb.button_pressed = test_vars[var_name]
 		cb.text = "true" if test_vars[var_name] else "false"
-		cb.add_theme_font_size_override("font_size", 11)
+		cb.add_theme_font_size_override("font_size", _fs(11))
 		cb.add_theme_color_override("font_color", COLORS["dim"])
 		cb.focus_mode = Control.FOCUS_NONE
 		cb.toggled.connect(func(on: bool) -> void:
@@ -2275,11 +2502,21 @@ func _vec_text(v: Vector2) -> String:
 		return "none"
 	return "(%.1f, %.1f)" % [v.x, v.y]
 
+
 # ============================================================================
 # Inspector
 # ============================================================================
 func _form_label(p_text: String) -> Label:
 	return _tiny_label(p_text.to_upper(), COLORS["faint"], 9)
+
+
+func _form_help(p_text: String) -> Label:
+	var help: Label = Label.new()
+	help.text = p_text
+	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	help.add_theme_font_size_override("font_size", _fs(11))
+	help.add_theme_color_override("font_color", COLORS["faint"])
+	return help
 
 
 func _commit_edit() -> void:
@@ -2339,141 +2576,22 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				var picked: int = ob.get_item_id(i)
 				if picked < 0:
 					var nm: String = await _prompt("New variable",
-						"Add a test variable to track.", "new_var")
+						"Add a test variable to track.", "my_variable")
 					if nm == "":
 						_update_inspector()
 						return
 					if not test_vars.has(nm):
 						test_vars[nm] = AntSchema.default_for(nm)
 					node.label = nm
-				else:
-					node.label = by_id[picked]
-				node.type = _var_type(node.label)
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(ob)
-			form_box.add_child(_form_label("Value type"))
-			var tle: LineEdit = LineEdit.new()
-			tle.text = node.type
-			tle.editable = false
-			_style_line_edit(tle)
-			tle.add_theme_color_override("font_uneditable_color", COLORS["faint"])
-			form_box.add_child(tle)
-		"timing":
-			form_box.add_child(_form_label("Name (optional)"))
-			var le: LineEdit = LineEdit.new()
-			le.text = node.label
-			le.placeholder_text = node.display_label()
-			_style_line_edit(le)
-			le.text_changed.connect(func(t: String) -> void:
-				node.label = t
-				insp_title.text = node.display_label()
-				var w: GraphNodeWidget = widgets.get(node.id)
-				if w:
-					w.refresh()
-				_repaint())
-			le.text_submitted.connect(func(_t: String) -> void: _commit_edit())
-			le.focus_exited.connect(_commit_edit)
-			form_box.add_child(le)
-			form_box.add_child(_form_label("Behaviour"))
-			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
-			for i: int in ConditionNodeData.TIMING_OPS.size():
-				var top: String = ConditionNodeData.TIMING_OPS[i]
-				ob.add_item(ConditionNodeData.TIMING_NAMES.get(top, top), i)
-				if top == node.op:
-					ob.selected = i
-			ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.TIMING_OPS[i]
-				node.reset_runtime()
+					node.type = AntSchema.type_of(nm)
+					_render_vars()
+					_commit_edit()
+					return
+				var chosen: String = by_id[picked]
+				node.label = chosen
+				node.type = AntSchema.type_of(chosen)
 				_commit_edit())
 			form_box.add_child(ob)
-			form_box.add_child(_form_label("Seconds"))
-			var spin: SpinBox = SpinBox.new()
-			spin.min_value = 0.0
-			spin.max_value = 600.0
-			spin.step = 0.1
-			spin.value = node.seconds
-			spin.editable = node.op != "latch"
-			_style_spin(spin)
-			spin.value_changed.connect(func(v: float) -> void:
-				node.seconds = maxf(0.0, v)
-				node.reset_runtime()
-				var w: GraphNodeWidget = widgets.get(node.id)
-				if w:
-					w.refresh()
-				insp_title.text = node.display_label()
-				_repaint())
-			form_box.add_child(spin)
-			form_box.add_child(_form_label("How it behaves"))
-			var help: Label = Label.new()
-			help.text = ConditionNodeData.TIMING_HELP.get(node.op, "")
-			help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			help.add_theme_font_size_override("font_size", 11)
-			help.add_theme_color_override("font_color", COLORS["faint"])
-			form_box.add_child(help)
-			var wiring: Label = Label.new()
-			wiring.text = "First input drives it. Wire a second input to use as the reset / trigger."
-			wiring.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			wiring.add_theme_font_size_override("font_size", 11)
-			wiring.add_theme_color_override("font_color", COLORS["dim"])
-			form_box.add_child(wiring)
-			var reset_btn: Button = Button.new()
-			reset_btn.text = "Reset this timer"
-			_style_button(reset_btn)
-			reset_btn.pressed.connect(func() -> void:
-				node.reset_runtime()
-				_repaint())
-			form_box.add_child(reset_btn)
-		"query":
-			form_box.add_child(_form_label("Measure"))
-			var measure_ob: OptionButton = OptionButton.new()
-			_style_option(measure_ob)
-			for i: int in ConditionNodeData.QUERY_MEASURES.size():
-				var m: String = ConditionNodeData.QUERY_MEASURES[i]
-				measure_ob.add_item(ConditionNodeData.MEASURE_WORDS.get(m, m), i)
-				if m == node.op:
-					measure_ob.selected = i
-			measure_ob.item_selected.connect(func(i: int) -> void:
-				node.op = ConditionNodeData.QUERY_MEASURES[i]
-				node.type = node.measure_type()
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(measure_ob)
-			form_box.add_child(_form_label("Subject"))
-			var subject_ob: OptionButton = OptionButton.new()
-			_style_option(subject_ob)
-			for i: int in ConditionNodeData.QUERY_SUBJECTS.size():
-				var sub: String = ConditionNodeData.QUERY_SUBJECTS[i]
-				subject_ob.add_item(ConditionNodeData.subject_name(sub), i)
-				if sub == node.subject:
-					subject_ob.selected = i
-			subject_ob.item_selected.connect(func(i: int) -> void:
-				node.subject = ConditionNodeData.QUERY_SUBJECTS[i]
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(subject_ob)
-			form_box.add_child(_form_label("Within"))
-			var scope_ob: OptionButton = OptionButton.new()
-			_style_option(scope_ob)
-			for i: int in ConditionNodeData.QUERY_SCOPES.size():
-				var sc: String = ConditionNodeData.QUERY_SCOPES[i]
-				scope_ob.add_item("%s (%s)" % [ConditionNodeData.scope_name(sc),
-					_trim_range(Ant.scope_range(sc))], i)
-				if sc == node.scope:
-					scope_ob.selected = i
-			scope_ob.item_selected.connect(func(i: int) -> void:
-				node.scope = ConditionNodeData.QUERY_SCOPES[i]
-				_commit_edit()
-				_render_vars())
-			form_box.add_child(scope_ob)
-			form_box.add_child(_form_label("Reads variable"))
-			var key_le: LineEdit = LineEdit.new()
-			key_le.text = node.var_key()
-			key_le.editable = false
-			_style_line_edit(key_le)
-			key_le.add_theme_color_override("font_uneditable_color", COLORS["faint"])
-			form_box.add_child(key_le)
 		"compare":
 			form_box.add_child(_form_label("Comparison"))
 			var ob: OptionButton = OptionButton.new()
@@ -2488,12 +2606,8 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				_commit_edit())
 			form_box.add_child(ob)
 			form_box.add_child(_form_label("Operands"))
-			var hint: Label = Label.new()
-			hint.text = "Double-click the node to enter and edit its two values."
-			hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			hint.add_theme_font_size_override("font_size", 11)
-			hint.add_theme_color_override("font_color", COLORS["faint"])
-			form_box.add_child(hint)
+			form_box.add_child(
+				_form_help("Double-click the node to enter and edit its two values."))
 		"logic":
 			form_box.add_child(_form_label("Name"))
 			var le: LineEdit = LineEdit.new()
@@ -2522,6 +2636,84 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				node.label = node.op.to_upper()
 				_commit_edit())
 			form_box.add_child(ob)
+		"timing":
+			form_box.add_child(_form_label("Behaviour"))
+			var ob: OptionButton = OptionButton.new()
+			_style_option(ob)
+			for i: int in ConditionNodeData.TIMING_OPS.size():
+				var op: String = ConditionNodeData.TIMING_OPS[i]
+				ob.add_item(ConditionNodeData.op_name(op), i)
+				if op == node.op:
+					ob.selected = i
+			ob.item_selected.connect(func(i: int) -> void:
+				node.op = ConditionNodeData.TIMING_OPS[i]
+				_commit_edit())
+			form_box.add_child(ob)
+			form_box.add_child(_form_label("Seconds"))
+			var spin: SpinBox = SpinBox.new()
+			spin.min_value = 0.0
+			spin.max_value = 600.0
+			spin.step = 0.1
+			spin.value = node.seconds
+			spin.editable = node.op != "latch"
+			_style_spin(spin)
+			spin.value_changed.connect(func(v: float) -> void:
+				node.seconds = maxf(0.0, v)
+				_commit_edit())
+			form_box.add_child(spin)
+			form_box.add_child(
+				_form_help(str(ConditionNodeData.TIMING_HELP.get(node.op, ""))))
+		"query":
+			form_box.add_child(_form_label("Measure"))
+			var measure_ob: OptionButton = OptionButton.new()
+			_style_option(measure_ob)
+			for i: int in ConditionNodeData.QUERY_MEASURES.size():
+				var m: String = ConditionNodeData.QUERY_MEASURES[i]
+				measure_ob.add_item(str(ConditionNodeData.MEASURE_WORDS.get(m, m)), i)
+				if m == node.op:
+					measure_ob.selected = i
+			measure_ob.item_selected.connect(func(i: int) -> void:
+				node.op = ConditionNodeData.QUERY_MEASURES[i]
+				node.type = node.measure_type()
+				_commit_edit()
+				_render_vars())
+			form_box.add_child(measure_ob)
+			form_box.add_child(_form_label("Subject"))
+			var subject_ob: OptionButton = OptionButton.new()
+			_style_option(subject_ob)
+			var subjects: Array = ConditionNodeData.SUBJECT_WORDS.keys()
+			for i: int in subjects.size():
+				var s: String = subjects[i]
+				subject_ob.add_item(str(ConditionNodeData.SUBJECT_WORDS[s]), i)
+				if s == node.subject:
+					subject_ob.selected = i
+			subject_ob.item_selected.connect(func(i: int) -> void:
+				node.subject = subjects[i]
+				_commit_edit()
+				_render_vars())
+			form_box.add_child(subject_ob)
+			form_box.add_child(_form_label("Scope"))
+			var scope_ob: OptionButton = OptionButton.new()
+			_style_option(scope_ob)
+			for i: int in ConditionNodeData.QUERY_SCOPES.size():
+				var sc: String = ConditionNodeData.QUERY_SCOPES[i]
+				scope_ob.add_item("%s (%s)" % [
+					ConditionNodeData.SCOPE_WORDS.get(sc, sc),
+					_trim_range(Ant.scope_range(sc))], i)
+				if sc == node.scope:
+					scope_ob.selected = i
+			scope_ob.item_selected.connect(func(i: int) -> void:
+				node.scope = ConditionNodeData.QUERY_SCOPES[i]
+				_commit_edit()
+				_render_vars())
+			form_box.add_child(scope_ob)
+			form_box.add_child(_form_label("Reads variable"))
+			var key_le: LineEdit = LineEdit.new()
+			key_le.text = node.var_key()
+			key_le.editable = false
+			_style_line_edit(key_le)
+			key_le.add_theme_color_override("font_uneditable_color", COLORS["faint"])
+			form_box.add_child(key_le)
 		"vector":
 			form_box.add_child(_form_label("Operation"))
 			var ob: OptionButton = OptionButton.new()
@@ -2538,53 +2730,32 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(ob)
 			if node.op == "const":
 				form_box.add_child(_form_label("Value"))
-				var xy: HBoxContainer = HBoxContainer.new()
-				xy.add_theme_constant_override("separation", 6)
+				var row: HBoxContainer = HBoxContainer.new()
+				row.add_theme_constant_override("separation", 6)
 				var sx: SpinBox = SpinBox.new()
 				sx.min_value = -9999.0
 				sx.max_value = 9999.0
 				sx.step = 0.1
 				sx.value = node.vec.x
 				_style_spin(sx)
+				sx.value_changed.connect(func(v: float) -> void:
+					node.vec.x = v
+					_commit_edit())
 				var sy: SpinBox = SpinBox.new()
 				sy.min_value = -9999.0
 				sy.max_value = 9999.0
 				sy.step = 0.1
 				sy.value = node.vec.y
 				_style_spin(sy)
-				sx.value_changed.connect(func(v: float) -> void:
-					node.vec.x = v
-					insp_title.text = node.display_label()
-					var w: GraphNodeWidget = widgets.get(node.id)
-					if w:
-						w.refresh()
-					_repaint())
 				sy.value_changed.connect(func(v: float) -> void:
 					node.vec.y = v
-					insp_title.text = node.display_label()
-					var w: GraphNodeWidget = widgets.get(node.id)
-					if w:
-						w.refresh()
-					_repaint())
-				xy.add_child(sx)
-				xy.add_child(sy)
-				form_box.add_child(xy)
-			form_box.add_child(_form_label("Inputs"))
-			var wants: Array = ConditionNodeData.VECTOR_INPUTS.get(node.op, [])
-			var wiring: Label = Label.new()
-			wiring.text = "none" if wants.is_empty() else "in order: %s" % ", ".join(
-				PackedStringArray(wants))
-			wiring.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			wiring.add_theme_font_size_override("font_size", 11)
-			wiring.add_theme_color_override("font_color", COLORS["dim"])
-			form_box.add_child(wiring)
-			form_box.add_child(_form_label("What it does"))
-			var help: Label = Label.new()
-			help.text = ConditionNodeData.VECTOR_HELP.get(node.op, "")
-			help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-			help.add_theme_font_size_override("font_size", 11)
-			help.add_theme_color_override("font_color", COLORS["faint"])
-			form_box.add_child(help)
+					_commit_edit())
+				row.add_child(sx)
+				row.add_child(sy)
+				form_box.add_child(row)
+			form_box.add_child(
+				_form_help(str(ConditionNodeData.VECTOR_HELP.get(node.op, ""))))
+
 
 func _update_inspector() -> void:
 	var ids: Array = selection.keys()
@@ -2675,92 +2846,3 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		else:
 			_go_back()
 		get_viewport().set_input_as_handled()
-
-func _setup_movable_panels() -> void:
-	var pairs: Array = [
-		[library_panel, library_panel.get_node("VBox/Head")],
-		[vars_panel, vars_panel.get_node("VBox/Head")],
-		[inspector_panel, inspector_panel.get_node("VBox/Head")],
-	]
-	for pair: Array in pairs:
-		var panel: PanelContainer = pair[0]
-		var handle: HBoxContainer = pair[1]
-		handle.mouse_filter = Control.MOUSE_FILTER_STOP
-		handle.mouse_default_cursor_shape = Control.CURSOR_MOVE
-		handle.tooltip_text = "Drag to move"
-		for child: Node in handle.get_children():
-			var lab: Label = child as Label
-			if lab != null:
-				lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		handle.gui_input.connect(_on_panel_handle_input.bind(panel))
-
-
-func _on_panel_handle_input(event: InputEvent, panel: PanelContainer) -> void:
-	var mb: InputEventMouseButton = event as InputEventMouseButton
-	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
-		return
-	if drag_mode != DragMode.NONE:
-		return
-	_float_panel(panel)
-	panel.move_to_front()
-	drag_mode = DragMode.PANEL
-	drag_button = MOUSE_BUTTON_LEFT
-	drag_panel = panel
-	panel_grab = panel.global_position - get_global_mouse_position()
-	get_viewport().set_input_as_handled()
-
-
-## Detach a panel from its scene anchors the first time it is dragged, keeping
-## exactly the rect it already occupied.
-func _float_panel(panel: PanelContainer) -> void:
-	var key: int = panel.get_instance_id()
-	if free_panels.has(key):
-		return
-	var here: Vector2 = panel.position
-	var box: Vector2 = panel.size
-	panel.set_anchors_preset(Control.PRESET_TOP_LEFT, false)
-	panel.position = here
-	panel.size = box
-	free_panels[key] = true
-
-
-func _clamp_panel(panel: PanelContainer) -> void:
-	if not free_panels.has(panel.get_instance_id()):
-		return
-	var lim: Vector2 = size - panel.size
-	panel.position = Vector2(
-		clampf(panel.position.x, PANEL_EDGE, maxf(PANEL_EDGE, lim.x - PANEL_EDGE)),
-		clampf(panel.position.y, PANEL_EDGE, maxf(PANEL_EDGE, lim.y - PANEL_EDGE)))
-
-func _setup_ui_scale() -> void:
-	ui_scale_slider.min_value = MIN_UI_SCALE
-	ui_scale_slider.max_value = MAX_UI_SCALE
-	ui_scale_slider.step = UI_SCALE_STEP
-	ui_scale_slider.focus_mode = Control.FOCUS_NONE
-	ui_scale_slider.tooltip_text = "Interface size"
-	ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
-	_set_ui_scale(_auto_ui_scale())
-
-
-## Starting point for a fresh install: match the layout's authored height.
-func _auto_ui_scale() -> float:
-	return clampf(float(get_window().size.y) / DESIGN_HEIGHT, MIN_UI_SCALE, MAX_UI_SCALE)
-
-
-func _on_ui_scale_changed(value: float) -> void:
-	_set_ui_scale(value)
-
-
-func _set_ui_scale(value: float) -> void:
-	ui_scale = clampf(snappedf(value, UI_SCALE_STEP), MIN_UI_SCALE, MAX_UI_SCALE)
-	get_window().content_scale_factor = ui_scale
-	ui_scale_slider.set_value_no_signal(ui_scale)
-	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
-	# Stage size is reported in the new logical units only after this frame.
-	call_deferred("_after_ui_scale")
-
-
-func _after_ui_scale() -> void:
-	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
-		_clamp_panel(p)
-	_build_viewport(true)
