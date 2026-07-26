@@ -34,14 +34,26 @@ const MIN_UI_SCALE: float = 0.75
 const MAX_UI_SCALE: float = 2.5
 ## Height the layout was authored against; used to derive an automatic scale.
 const DESIGN_HEIGHT: float = 900.0
+const EDGE_PAD: float = 24.0     # keep the layer this far off the canvas origin
+const REVEAL_PAD: float = 32.0   # breathing room when scrolling something into view
+## Payload tag for library -> canvas drag and drop.
+const DRAG_CONDITION: String = "chem_ants/condition_group"
+const UI_SCALE_STEP: float = 0.05
+
 #endregion
 
 
-## Payload tag for library -> canvas drag and drop.
-const DRAG_CONDITION: String = "chem_ants/condition_group"
 
-enum DragMode { NONE, NODE_PENDING, NODE, MARQUEE_PENDING, MARQUEE, PAN, WIRE }
+enum DragMode { NONE, NODE_PENDING, NODE, MARQUEE_PENDING, MARQUEE, PAN, WIRE, PANEL }
 
+const PANEL_EDGE: float = 8.0
+var drag_panel: PanelContainer = null
+var panel_grab: Vector2 = Vector2.ZERO
+## instance id -> true, for panels that have been detached from their anchors.
+var free_panels: Dictionary = {}
+## Set by an expand/collapse so the next rebuild is allowed to push subtrees
+## apart. Plain rebuilds leave hand-placed cards exactly where they are.
+var _needs_room: bool = false
 #region document state
 var behavior_title: String = "Engage Target"
 var tree_root: ConditionNodeData
@@ -148,10 +160,12 @@ signal _modal_done(text: String)
 @onready var modal_input: LineEdit = %ModalInput
 @onready var modal_cancel: Button = %ModalCancel
 @onready var modal_save: Button = %ModalSave
+@onready var ui_scale_slider: HSlider = %UiScale
+@onready var ui_scale_label: Label = %UiScaleLabel
 
 var rail: OutputRailWidget = null
 var _toast_tween: Tween = null
-
+var ui_scale: float = 1.0
 
 
 
@@ -179,11 +193,23 @@ func _ready() -> void:
 	behavior_label.text = behavior_title
 	var _gd: int = grid_layer.draw.connect(_draw_grid)
 
-
+	resized.connect(_on_editor_resized)
 	_boot_done = true
+	_place_back_button()
+	_setup_movable_panels()
+	_setup_ui_scale()
 	call_deferred("_render_all")
 
-
+func _on_editor_resized() -> void:
+	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
+		_clamp_panel(p)
+## Back reads as "up out of here", so it belongs immediately left of the trail
+## it walks back along, not stranded at the far end of the toolbar.
+func _place_back_button() -> void:
+	var bar: HBoxContainer = back_btn.get_parent() as HBoxContainer
+	if bar == null:
+		return
+	bar.move_child(back_btn, crumbs_box.get_index())
 func _check_glyph_coverage() -> void:
 	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7\u2220\u2212\u21bb\u00fb\u03b8\u00b7"	
 	for i: int in needed.length():
@@ -649,7 +675,9 @@ func _build_viewport(skip_anim: bool = false) -> void:
 		_place_tree(c, 0.0, 0.0)
 	for n: ConditionNodeData in loose_roots:
 		_place_tree(n, 0.0, 0.0)
-
+	for n: ConditionNodeData in loose_roots:
+		_place_tree(n, 0.0, 0.0)
+	_make_room(f, loose_roots)
 	# Extents. The rail follows the wired tree only, so dropping a card off to
 	# the right doesn't drag the output with it.
 	var lp: Dictionary = _layer_positions()
@@ -708,6 +736,120 @@ func _build_viewport(skip_anim: bool = false) -> void:
 		prev_visible[n.id] = true
 	_repaint()
 
+## Keep an expansion legible: push overlapping subtrees apart, then shove the
+## whole layer back inside the canvas if it grew off the left or top edge.
+## Results are written to the layer store, so the shuffle is permanent.
+func _make_room(f: ConditionNodeData, loose_roots: Array[ConditionNodeData]) -> void:
+	var tops: Array[ConditionNodeData] = []
+	for c: ConditionNodeData in f.children:
+		tops.append(c)
+	for n: ConditionNodeData in loose_roots:
+		tops.append(n)
+	if tops.is_empty():
+		return
+	if _needs_room:
+		_needs_room = false
+		_separate_subtrees(tops)
+	_shift_into_canvas()
+
+
+## Bounding box of everything currently drawn for this root.
+func _subtree_rect(n: ConditionNodeData) -> Rect2:
+	var out: Rect2 = Rect2()
+	var started: bool = false
+	for sid: String in _visible_subtree_ids(n.id):
+		if not node_pos.has(sid) or not widgets.has(sid):
+			continue
+		var box: Rect2 = Rect2(node_pos[sid], (widgets[sid] as GraphNodeWidget).size)
+		if started:
+			out = out.merge(box)
+		else:
+			out = box
+			started = true
+	return out
+
+
+func _shift_subtree(n: ConditionNodeData, delta: Vector2) -> void:
+	if delta.is_zero_approx():
+		return
+	var lp: Dictionary = _layer_positions()
+	for sid: String in _visible_subtree_ids(n.id):
+		if node_pos.has(sid):
+			node_pos[sid] = (node_pos[sid] as Vector2) + delta
+		if lp.has(sid):
+			lp[sid] = (lp[sid] as Vector2) + delta
+
+
+## Top-down sweep: each subtree drops below anything it collides with.
+func _separate_subtrees(tops: Array[ConditionNodeData]) -> void:
+	var order: Array[ConditionNodeData] = tops.duplicate()
+	order.sort_custom(func(a: ConditionNodeData, b: ConditionNodeData) -> bool:
+		return _subtree_rect(a).position.y < _subtree_rect(b).position.y)
+	var taken: Array[Rect2] = []
+	for n: ConditionNodeData in order:
+		var box: Rect2 = _subtree_rect(n)
+		if box.size.y <= 0.0:
+			continue
+		var start_y: float = box.position.y
+		var moved: bool = true
+		var guard: int = 0
+		while moved and guard < 8:
+			moved = false
+			guard += 1
+			for other: Rect2 in taken:
+				if box.intersects(other):
+					box.position.y = other.end.y + V_GAP
+					moved = true
+		_shift_subtree(n, Vector2(0.0, box.position.y - start_y))
+		taken.append(box)
+
+
+## The canvas can grow right and down on its own, but nothing left of x = 0 is
+## reachable, so the layer moves instead.
+func _shift_into_canvas() -> void:
+	var min_l: float = INF
+	var min_t: float = INF
+	for n: ConditionNodeData in visible_nodes:
+		if not node_pos.has(n.id):
+			continue
+		var p: Vector2 = node_pos[n.id]
+		min_l = minf(min_l, p.x)
+		min_t = minf(min_t, p.y)
+	if min_l == INF:
+		return
+	var delta: Vector2 = Vector2(maxf(0.0, EDGE_PAD - min_l), maxf(0.0, EDGE_PAD - min_t))
+	if delta.is_zero_approx():
+		return
+	var lp: Dictionary = _layer_positions()
+	for key: String in lp.keys():
+		lp[key] = (lp[key] as Vector2) + delta
+	for nid: String in node_pos.keys():
+		node_pos[nid] = (node_pos[nid] as Vector2) + delta
+
+
+## Pan the stage until `area` (world space) is on screen.
+func _reveal_rect(area: Rect2) -> void:
+	if area.size.x <= 0.0 or area.size.y <= 0.0:
+		return
+	var view_pos: Vector2 = -world.position / zoom
+	var view_size: Vector2 = stage.size / zoom
+	var target: Vector2 = world.position
+	if area.position.x - REVEAL_PAD < view_pos.x:
+		target.x += (view_pos.x - area.position.x + REVEAL_PAD) * zoom
+	elif area.end.x + REVEAL_PAD > view_pos.x + view_size.x:
+		target.x -= (area.end.x + REVEAL_PAD - view_pos.x - view_size.x) * zoom
+	if area.position.y - REVEAL_PAD < view_pos.y:
+		target.y += (view_pos.y - area.position.y + REVEAL_PAD) * zoom
+	elif area.end.y + REVEAL_PAD > view_pos.y + view_size.y:
+		target.y -= (area.end.y + REVEAL_PAD - view_pos.y - view_size.y) * zoom
+	var lim: Vector2 = stage.size - content_size * zoom
+	target.x = clampf(target.x, minf(0.0, lim.x), 0.0)
+	target.y = clampf(target.y, minf(0.0, lim.y), 0.0)
+	if target.is_equal_approx(world.position):
+		return
+	var tw: Tween = create_tween()
+	tw.tween_property(world, "position", target, 0.28) \
+		.set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_OUT)
 
 ## Give every top-level card a stored position. An empty layer gets the full
 ## tidy tree layout; a layer that already has positions only places newcomers,
@@ -1259,7 +1401,10 @@ func _drag_motion() -> void:
 		DragMode.WIRE:
 			trace_layer.set_preview(true, wire_from, _to_world(gp),
 				1.0 if wire_dir == "out" else -1.0)
-
+		DragMode.PANEL:
+			if drag_panel != null:
+				drag_panel.global_position = gp + panel_grab
+				_clamp_panel(drag_panel)
 
 func _drag_release() -> void:
 	var mode: DragMode = drag_mode
@@ -1283,8 +1428,8 @@ func _drag_release() -> void:
 		DragMode.WIRE:
 			trace_layer.set_preview(false)
 			_finish_wire()
-
-
+		DragMode.PANEL:
+			drag_panel = null
 # ============================================================================
 # Wiring
 # ============================================================================
@@ -2530,3 +2675,92 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		else:
 			_go_back()
 		get_viewport().set_input_as_handled()
+
+func _setup_movable_panels() -> void:
+	var pairs: Array = [
+		[library_panel, library_panel.get_node("VBox/Head")],
+		[vars_panel, vars_panel.get_node("VBox/Head")],
+		[inspector_panel, inspector_panel.get_node("VBox/Head")],
+	]
+	for pair: Array in pairs:
+		var panel: PanelContainer = pair[0]
+		var handle: HBoxContainer = pair[1]
+		handle.mouse_filter = Control.MOUSE_FILTER_STOP
+		handle.mouse_default_cursor_shape = Control.CURSOR_MOVE
+		handle.tooltip_text = "Drag to move"
+		for child: Node in handle.get_children():
+			var lab: Label = child as Label
+			if lab != null:
+				lab.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		handle.gui_input.connect(_on_panel_handle_input.bind(panel))
+
+
+func _on_panel_handle_input(event: InputEvent, panel: PanelContainer) -> void:
+	var mb: InputEventMouseButton = event as InputEventMouseButton
+	if mb == null or not mb.pressed or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if drag_mode != DragMode.NONE:
+		return
+	_float_panel(panel)
+	panel.move_to_front()
+	drag_mode = DragMode.PANEL
+	drag_button = MOUSE_BUTTON_LEFT
+	drag_panel = panel
+	panel_grab = panel.global_position - get_global_mouse_position()
+	get_viewport().set_input_as_handled()
+
+
+## Detach a panel from its scene anchors the first time it is dragged, keeping
+## exactly the rect it already occupied.
+func _float_panel(panel: PanelContainer) -> void:
+	var key: int = panel.get_instance_id()
+	if free_panels.has(key):
+		return
+	var here: Vector2 = panel.position
+	var box: Vector2 = panel.size
+	panel.set_anchors_preset(Control.PRESET_TOP_LEFT, false)
+	panel.position = here
+	panel.size = box
+	free_panels[key] = true
+
+
+func _clamp_panel(panel: PanelContainer) -> void:
+	if not free_panels.has(panel.get_instance_id()):
+		return
+	var lim: Vector2 = size - panel.size
+	panel.position = Vector2(
+		clampf(panel.position.x, PANEL_EDGE, maxf(PANEL_EDGE, lim.x - PANEL_EDGE)),
+		clampf(panel.position.y, PANEL_EDGE, maxf(PANEL_EDGE, lim.y - PANEL_EDGE)))
+
+func _setup_ui_scale() -> void:
+	ui_scale_slider.min_value = MIN_UI_SCALE
+	ui_scale_slider.max_value = MAX_UI_SCALE
+	ui_scale_slider.step = UI_SCALE_STEP
+	ui_scale_slider.focus_mode = Control.FOCUS_NONE
+	ui_scale_slider.tooltip_text = "Interface size"
+	ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
+	_set_ui_scale(_auto_ui_scale())
+
+
+## Starting point for a fresh install: match the layout's authored height.
+func _auto_ui_scale() -> float:
+	return clampf(float(get_window().size.y) / DESIGN_HEIGHT, MIN_UI_SCALE, MAX_UI_SCALE)
+
+
+func _on_ui_scale_changed(value: float) -> void:
+	_set_ui_scale(value)
+
+
+func _set_ui_scale(value: float) -> void:
+	ui_scale = clampf(snappedf(value, UI_SCALE_STEP), MIN_UI_SCALE, MAX_UI_SCALE)
+	get_window().content_scale_factor = ui_scale
+	ui_scale_slider.set_value_no_signal(ui_scale)
+	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
+	# Stage size is reported in the new logical units only after this frame.
+	call_deferred("_after_ui_scale")
+
+
+func _after_ui_scale() -> void:
+	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
+		_clamp_panel(p)
+	_build_viewport(true)
