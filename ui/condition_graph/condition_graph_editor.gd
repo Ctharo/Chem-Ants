@@ -18,9 +18,9 @@ const COLORS: Dictionary = {
 	"vector": Color("7fd7ff"),
 }
 
+#region constants
 ## Reserved key inside a layer's position map holding the output rail's spot.
 const RAIL_KEY: String = "#rail"
-
 const V_GAP: float = 24.0       # vertical gap between sibling subtrees
 const GUTTER: float = 56.0      # left gutter for auto-layout
 const COL_GAP: float = 70.0     # horizontal gap between a parent and its children
@@ -34,8 +34,7 @@ const MIN_UI_SCALE: float = 0.75
 const MAX_UI_SCALE: float = 2.5
 ## Height the layout was authored against; used to derive an automatic scale.
 const DESIGN_HEIGHT: float = 900.0
-
-var ui_scale: float = 1.0
+#endregion
 
 
 ## Payload tag for library -> canvas drag and drop.
@@ -43,7 +42,7 @@ const DRAG_CONDITION: String = "chem_ants/condition_group"
 
 enum DragMode { NONE, NODE_PENDING, NODE, MARQUEE_PENDING, MARQUEE, PAN, WIRE }
 
-# --- document state ---------------------------------------------------------
+#region document state
 var behavior_title: String = "Engage Target"
 var tree_root: ConditionNodeData
 var path: Array[ConditionNodeData] = []
@@ -57,8 +56,6 @@ var expanded_by_layer: Dictionary = {}  # layer id -> {node id: true}
 var prev_visible: Dictionary = {}       # id -> true
 var spotlight: Variant = null           # null | Dictionary id -> true
 var positions: Dictionary = {}          # layer id -> {node id: Vector2}
-## layer id -> Array[ConditionNodeData]: roots parked on the canvas but not
-## feeding anything yet.
 var loose: Dictionary = {}
 var test_vars: Dictionary = {}
 var clipboard: Array[ConditionNodeData] = []
@@ -68,15 +65,17 @@ var zoom: float = 1.0
 var content_size: Vector2 = Vector2(100, 100)
 ## True while any timing node exists, which puts the editor into live ticking.
 var live: bool = false
+#endregion
 
-# --- render state -----------------------------------------------------------
+#region render state
 var widgets: Dictionary = {}            # id -> GraphNodeWidget
 var node_pos: Dictionary = {}           # id -> Vector2 (layout target positions)
 var visible_nodes: Array[ConditionNodeData] = []
 var parent_of: Dictionary = {}          # id -> ConditionNodeData (null = unwired root)
 var ui_font: Font
+#endregion
 
-# --- interaction state ------------------------------------------------------
+#region interaction state
 var drag_mode: DragMode = DragMode.NONE
 var drag_widget: GraphNodeWidget = null
 var drag_button: MouseButton = MOUSE_BUTTON_LEFT
@@ -95,6 +94,7 @@ var marquee_base: Dictionary = {}
 var _click_token: int = 0
 var _nav_tween: Tween = null
 var _boot_done: bool = false
+#endregion
 
 
 signal _modal_done(text: String)
@@ -153,84 +153,6 @@ var rail: OutputRailWidget = null
 var _toast_tween: Tween = null
 
 
-# ============================================================================
-# Output rail (custom-drawn, built in code)
-# ============================================================================
-class OutputRailWidget extends Control:
-	signal rail_clicked
-	signal rail_port_pressed(event: InputEventMouseButton)
-
-	var colors: Dictionary
-	var font: Font
-	var glyph_text: String = ""
-	var glyph_color: Color = Color.WHITE
-	var gate_name: String = ""
-	var out_state: Variant = null   # null / true / false
-	var selected: bool = false
-	var _port: GraphNodeWidget.Port
-
-	func _init(p_colors: Dictionary, p_font: Font) -> void:
-		colors = p_colors
-		font = p_font
-		size = Vector2(ConditionGraphEditor.RAIL_W, ConditionGraphEditor.RAIL_H)
-		mouse_filter = Control.MOUSE_FILTER_STOP
-		_port = GraphNodeWidget.Port.new()
-		_port.dir = "in"
-		_port.color = colors["focus"]
-		_port.position = Vector2(-8, size.y * 0.5 - 8)
-		_port.port_down.connect(func(_d: String, ev: InputEventMouseButton) -> void:
-			rail_port_pressed.emit(ev))
-		add_child(_port)
-
-	func port_point() -> Vector2:
-		return position + Vector2(-6.0, size.y * 0.5)
-
-	func _gui_input(event: InputEvent) -> void:
-		if event is InputEventMouseButton and event.pressed \
-				and event.button_index == MOUSE_BUTTON_LEFT:
-			accept_event()
-			rail_clicked.emit()
-
-	func _draw() -> void:
-		var sb: StyleBoxFlat = StyleBoxFlat.new()
-		sb.bg_color = Color("121c26")
-		sb.set_corner_radius_all(14)
-		sb.set_border_width_all(1)
-		sb.border_color = Color("33475a")
-		sb.shadow_color = Color(0, 0, 0, 0.5)
-		sb.shadow_size = 14
-		sb.shadow_offset = Vector2(0, 8)
-		if selected:
-			sb.border_color = colors["sel"]
-			sb.set_border_width_all(2)
-		elif out_state is bool:
-			var ec: Color = colors["true"] if out_state else colors["false"]
-			sb.border_color = Color(ec, 0.7)
-			sb.shadow_color = Color(ec, 0.25)
-		draw_style_box(sb, Rect2(Vector2.ZERO, size))
-		var cx: float = size.x * 0.5
-		var t: String = "OUTPUT"
-		var w: float = font.get_string_size(t, HORIZONTAL_ALIGNMENT_LEFT, -1, 9).x
-		draw_string(font, Vector2(cx - w * 0.5, 24), t, HORIZONTAL_ALIGNMENT_LEFT, -1, 9,
-			colors["faint"])
-		var gtxt: String = glyph_text + "  " + gate_name
-		w = font.get_string_size(gtxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		w = minf(w, size.x - 16)
-		draw_string(font, Vector2(cx - w * 0.5, 52), gtxt, HORIZONTAL_ALIGNMENT_LEFT,
-			int(size.x - 16), 13, glyph_color)
-		var vtxt: String = "?"
-		var vcol: Color = colors["dim"]
-		if out_state is bool:
-			vtxt = "TRUE" if out_state else "FALSE"
-			vcol = colors["true"] if out_state else colors["false"]
-		w = font.get_string_size(vtxt, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
-		var chip: Rect2 = Rect2(cx - w * 0.5 - 10, 68, w + 20, 26)
-		var csb: StyleBoxFlat = StyleBoxFlat.new()
-		csb.bg_color = colors["panel"]
-		csb.set_corner_radius_all(7)
-		draw_style_box(csb, chip)
-		draw_string(font, Vector2(cx - w * 0.5, 86), vtxt, HORIZONTAL_ALIGNMENT_LEFT, -1,
-			13, vcol)
 
 
 # ============================================================================
