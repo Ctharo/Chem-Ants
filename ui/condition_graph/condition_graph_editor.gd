@@ -12,16 +12,7 @@ extends Control
 ## the chrome re-derives its font sizes, so nothing here touches
 ## Window.content_scale_factor and the simulation keeps rendering at 1:1.
 
-const COLORS: Dictionary = {
-	"bg": Color("0a0f14"), "grid": Color(0.47, 0.65, 0.76, 0.055),
-	"panel": Color("0e151d"), "surface": Color("141e28"), "surface_hi": Color("1a2632"),
-	"line": Color("243444"), "text": Color("e7eef4"), "dim": Color("8ea0b0"),
-	"faint": Color("566878"), "logic": Color("38d3c2"), "compare": Color("f2b45c"),
-	"property": Color("78d67e"), "literal": Color("b596f2"), "focus": Color("e7eef4"),
-	"sel": Color("5ab0ff"), "true": Color("4bd88a"), "false": Color("ff6274"),
-	"timing": Color("ff7eb6"), "query": Color("ff8f5e"),
-	"vector": Color("7fd7ff"),
-}
+const COLORS: Dictionary = GraphTheme.COLORS
 
 ## Reserved key inside a layer's position map holding the output rail's spot.
 const RAIL_KEY: String = "#rail"
@@ -101,9 +92,7 @@ var clipboard: Array[ConditionNodeData] = []
 var groups: Array[Dictionary] = []      # {"id", "name", "root": ConditionNodeData}
 var dirty_pkg: Variant = null           # null | {"node", "group"}
 var zoom: float = 1.0
-## Interface size for this editor only. Multiplies into the canvas transform and
-## every chrome font size; never leaves this scene.
-var ui_scale: float = 1.0
+var skin: GraphTheme = null
 var content_size: Vector2 = Vector2(100, 100)
 ## True while any timing node exists, which puts the editor into live ticking.
 var live: bool = false
@@ -113,7 +102,7 @@ var widgets: Dictionary = {}            # id -> GraphNodeWidget
 var node_pos: Dictionary = {}           # id -> Vector2 (layout target positions)
 var visible_nodes: Array[ConditionNodeData] = []
 var parent_of: Dictionary = {}          # id -> ConditionNodeData (null = unwired root)
-var ui_font: Font
+
 
 # --- interaction state ------------------------------------------------------
 var drag_mode: DragMode = DragMode.NONE
@@ -205,8 +194,9 @@ var _toast_tween: Tween = null
 # Lifecycle
 # ============================================================================
 func _ready() -> void:
-	ui_font = get_theme_default_font()
-	_check_glyph_coverage()
+	skin = GraphTheme.new(get_theme_default_font(),
+		GraphTheme.auto_scale(float(get_window().size.y)))
+	ConditionNodeData.ascii_mode = not skin.has_all_glyphs()
 	ConditionLibrary.dev_reset_user_data()
 	_build_sample_document()
 
@@ -222,7 +212,7 @@ func _ready() -> void:
 	_connect_chrome()
 	_place_back_button()
 	_setup_movable_panels()
-	rail = OutputRailWidget.new(COLORS, ui_font)
+	rail = OutputRailWidget.new(COLORS, skin.font)
 	var _rc: int = rail.rail_clicked.connect(_on_rail_clicked)
 	var _rp: int = rail.rail_port_pressed.connect(_on_rail_port_pressed)
 	world.add_child(rail)
@@ -235,12 +225,35 @@ func _ready() -> void:
 	call_deferred("_render_all")
 
 
-func _check_glyph_coverage() -> void:
-	var needed: String = "\u2227\u2228\u00ac\u2295\u2264\u2265\u2260\u25c6\u25b8\u25be\u25a3\u25ce\u00d7\u2220\u2212\u21bb\u00fb\u03b8\u00b7"
-	for i: int in needed.length():
-		if not ui_font.has_char(needed.unicode_at(i)):
-			ConditionNodeData.ascii_mode = true
-			return
+## Wires the slider only - `skin` already holds the scale by the time this runs.
+func _setup_ui_scale() -> void:
+	ui_scale_slider.min_value = GraphTheme.MIN_UI_SCALE
+	ui_scale_slider.max_value = GraphTheme.MAX_UI_SCALE
+	ui_scale_slider.step = GraphTheme.UI_SCALE_STEP
+	ui_scale_slider.focus_mode = Control.FOCUS_NONE
+	ui_scale_slider.tooltip_text = "Interface size"
+	var _uc: int = ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
+	ui_scale_slider.set_value_no_signal(skin.ui_scale)
+	ui_scale_label.text = skin.percent_text()
+
+
+func _set_ui_scale(value: float) -> void:
+	skin.ui_scale = skin.clamp_scale(value)
+	ui_scale_slider.set_value_no_signal(skin.ui_scale)
+	ui_scale_label.text = skin.percent_text()
+	_apply_styles()
+	_apply_zoom()
+	_render_library()
+	_render_vars()
+	_update_inspector()
+	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
+		_clamp_panel(p)
+
+
+## Canvas magnification: user zoom times interface scale. Anything converting
+## between stage and world space uses this, never `zoom` on its own.
+func _view_scale() -> float:
+	return zoom * skin.ui_scale
 
 
 func _build_sample_document() -> void:
@@ -291,24 +304,6 @@ func _persist_library() -> void:
 		push_error("Condition library: save failed (error %d)." % err)
 
 
-# ============================================================================
-# Interface size
-#
-# Two halves: the canvas folds ui_scale into world's transform (see
-# _view_scale()), and the chrome re-derives font sizes and margins through
-# _fs()/_px() so text stays crisply rasterised rather than magnified.
-# ============================================================================
-func _setup_ui_scale() -> void:
-	ui_scale_slider.min_value = MIN_UI_SCALE
-	ui_scale_slider.max_value = MAX_UI_SCALE
-	ui_scale_slider.step = UI_SCALE_STEP
-	ui_scale_slider.focus_mode = Control.FOCUS_NONE
-	ui_scale_slider.tooltip_text = "Interface size"
-	ui_scale_slider.value_changed.connect(_on_ui_scale_changed)
-	ui_scale = _auto_ui_scale()
-	ui_scale_slider.set_value_no_signal(ui_scale)
-	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
-
 
 ## Starting point on a fresh launch: match the height the layout was authored at.
 func _auto_ui_scale() -> float:
@@ -319,137 +314,16 @@ func _on_ui_scale_changed(value: float) -> void:
 	_set_ui_scale(value)
 
 
-func _set_ui_scale(value: float) -> void:
-	ui_scale = clampf(snappedf(value, UI_SCALE_STEP), MIN_UI_SCALE, MAX_UI_SCALE)
-	ui_scale_slider.set_value_no_signal(ui_scale)
-	ui_scale_label.text = "%d%%" % roundi(ui_scale * 100.0)
-	_apply_styles()
-	_apply_zoom()
-	_render_library()
-	_render_vars()
-	_update_inspector()
-	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
-		_clamp_panel(p)
 
 
-## Canvas magnification: user zoom times interface scale. Anything converting
-## between stage and world space uses this, never `zoom` on its own.
-func _view_scale() -> float:
-	return zoom * ui_scale
 
 
-## Font size authored at 1.0, scaled for the current interface size.
-func _fs(base: int) -> int:
-	return maxi(1, roundi(float(base) * ui_scale))
-
-
-## Pixel distance authored at 1.0, scaled for the current interface size.
-func _px(base: float) -> float:
-	return base * ui_scale
-
-
-# ============================================================================
-# Styling helpers
-# ============================================================================
-func _panel_style(bg: Color, border: Color, radius: int = 13, margin: int = 13) -> StyleBoxFlat:
-	var sb: StyleBoxFlat = StyleBoxFlat.new()
-	sb.bg_color = bg
-	sb.border_color = border
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(roundi(_px(float(radius))))
-	sb.set_content_margin_all(_px(float(margin)))
-	sb.shadow_color = Color(0, 0, 0, 0.5)
-	sb.shadow_size = 14
-	sb.shadow_offset = Vector2(0, 8)
-	return sb
-
-
-func _style_button(btn: Button, kind: String = "normal") -> void:
-	var normal: StyleBoxFlat = StyleBoxFlat.new()
-	normal.set_corner_radius_all(roundi(_px(8.0)))
-	normal.set_border_width_all(1)
-	normal.content_margin_left = _px(11.0)
-	normal.content_margin_right = _px(11.0)
-	normal.content_margin_top = _px(7.0)
-	normal.content_margin_bottom = _px(7.0)
-	match kind:
-		"primary":
-			normal.bg_color = COLORS["sel"]
-			normal.border_color = COLORS["sel"]
-			btn.add_theme_color_override("font_color", Color("04121f"))
-			btn.add_theme_color_override("font_hover_color", Color("04121f"))
-			btn.add_theme_color_override("font_pressed_color", Color("04121f"))
-		"danger":
-			normal.bg_color = COLORS["surface"]
-			normal.border_color = COLORS["line"].lerp(COLORS["false"], 0.3)
-			btn.add_theme_color_override("font_color", Color("ff8a95"))
-			btn.add_theme_color_override("font_hover_color", Color("ffa9b1"))
-		"flat":
-			normal.bg_color = Color(0, 0, 0, 0)
-			normal.border_color = Color(0, 0, 0, 0)
-			btn.add_theme_color_override("font_color", COLORS["faint"])
-			btn.add_theme_color_override("font_hover_color", COLORS["text"])
-		_:
-			normal.bg_color = COLORS["surface"]
-			normal.border_color = COLORS["line"]
-			btn.add_theme_color_override("font_color", COLORS["text"])
-			btn.add_theme_color_override("font_hover_color", COLORS["text"])
-	var hover: StyleBoxFlat = normal.duplicate()
-	if kind == "primary":
-		hover.bg_color = Color("7cc1ff")
-	elif kind == "flat":
-		hover.bg_color = COLORS["surface_hi"]
-	else:
-		hover.bg_color = COLORS["surface_hi"]
-		hover.border_color = Color("33475a")
-	var pressed: StyleBoxFlat = hover.duplicate()
-	pressed.bg_color = hover.bg_color.darkened(0.08)
-	btn.add_theme_stylebox_override("normal", normal)
-	btn.add_theme_stylebox_override("hover", hover)
-	btn.add_theme_stylebox_override("pressed", pressed)
-	var disabled: StyleBoxFlat = normal.duplicate()
-	disabled.bg_color = Color(normal.bg_color, 0.35)
-	btn.add_theme_stylebox_override("disabled", disabled)
-	btn.add_theme_color_override("font_disabled_color", COLORS["faint"])
-	btn.add_theme_font_size_override("font_size", _fs(12))
-	btn.focus_mode = Control.FOCUS_NONE
-
-
-func _style_line_edit(le: LineEdit) -> void:
-	var sb: StyleBoxFlat = StyleBoxFlat.new()
-	sb.bg_color = COLORS["panel"]
-	sb.border_color = COLORS["line"]
-	sb.set_border_width_all(1)
-	sb.set_corner_radius_all(roundi(_px(8.0)))
-	sb.set_content_margin_all(_px(9.0))
-	var focus: StyleBoxFlat = sb.duplicate()
-	focus.border_color = COLORS["sel"]
-	le.add_theme_stylebox_override("normal", sb)
-	le.add_theme_stylebox_override("focus", focus)
-	le.add_theme_color_override("font_color", COLORS["text"])
-	le.add_theme_font_size_override("font_size", _fs(13))
-
-
-func _style_spin(spin: SpinBox) -> void:
-	_style_line_edit(spin.get_line_edit())
-	spin.add_theme_font_size_override("font_size", _fs(13))
 
 
 static func _trim_range(v: float) -> String:
 	return "%d units" % roundi(v)
 
 
-func _style_option(ob: OptionButton) -> void:
-	_style_button(ob)
-	ob.add_theme_font_size_override("font_size", _fs(13))
-
-
-func _tiny_label(p_text: String, p_color: Color, font_size: int = 9) -> Label:
-	var l: Label = Label.new()
-	l.text = p_text
-	l.add_theme_font_size_override("font_size", _fs(font_size))
-	l.add_theme_color_override("font_color", p_color)
-	return l
 
 
 func _apply_styles() -> void:
@@ -457,33 +331,33 @@ func _apply_styles() -> void:
 	top_sb.bg_color = COLORS["panel"]
 	top_sb.border_width_bottom = 1
 	top_sb.border_color = COLORS["line"]
-	top_sb.content_margin_left = _px(16.0)
-	top_sb.content_margin_right = _px(16.0)
-	top_sb.content_margin_top = _px(8.0)
-	top_sb.content_margin_bottom = _px(8.0)
+	top_sb.content_margin_left = skin.px(16.0)
+	top_sb.content_margin_right = skin.px(16.0)
+	top_sb.content_margin_top = skin.px(8.0)
+	top_sb.content_margin_bottom = skin.px(8.0)
 	($TopBar as PanelContainer).add_theme_stylebox_override("panel", top_sb)
 
 	for p: PanelContainer in [library_panel, vars_panel, inspector_panel]:
 		p.add_theme_stylebox_override("panel",
-			_panel_style(Color(COLORS["surface"], 0.94), COLORS["line"]))
+			skin.panel_style(Color(COLORS["surface"], 0.94), COLORS["line"]))
 	pkg_bar.add_theme_stylebox_override("panel",
-		_panel_style(COLORS["surface"], COLORS["sel"], 11, 10))
+		skin.panel_style(COLORS["surface"], COLORS["sel"], 11, 10))
 	toast_panel.add_theme_stylebox_override("panel",
-		_panel_style(COLORS["surface_hi"], COLORS["line"], 10, 11))
+		skin.panel_style(COLORS["surface_hi"], COLORS["line"], 10, 11))
 	(%ModalPanel as PanelContainer).add_theme_stylebox_override("panel",
-		_panel_style(COLORS["surface"], COLORS["line"], 14, 18))
+		skin.panel_style(COLORS["surface"], COLORS["line"], 14, 18))
 
 	for b: Button in [zoom_out_btn, zoom_in_btn, arrange_btn, cond_btn, vars_btn,
 			back_btn, copy_btn, copy_btn_m, pkg_keep_btn, modal_cancel]:
-		_style_button(b)
+		skin.style_button(b)
 	for b: Button in [delete_btn, delete_btn_m]:
-		_style_button(b, "danger")
+		skin.style_button(b, "danger")
 	for b: Button in [save_cond_btn, pkg_update_btn, modal_save]:
-		_style_button(b, "primary")
-	_style_button(pkg_new_btn)
+		skin.style_button(b, "primary")
+	skin.style_button(pkg_new_btn)
 	for b: Button in [zoom_label_btn, lib_close, vars_close]:
-		_style_button(b, "flat")
-	_style_line_edit(modal_input)
+		skin.style_button(b, "flat")
+	skin.style_line_edit(modal_input)
 	back_btn.text = ("\u2190 Back" if not ConditionNodeData.ascii_mode else "< Back")
 
 	# Legend swatches.
@@ -496,11 +370,11 @@ func _apply_styles() -> void:
 		var h: HBoxContainer = HBoxContainer.new()
 		h.add_theme_constant_override("separation", 5)
 		var sw: ColorRect = ColorRect.new()
-		sw.custom_minimum_size = Vector2(_px(9.0), _px(9.0))
+		sw.custom_minimum_size = Vector2(skin.px(9.0), skin.px(9.0))
 		sw.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		sw.color = COLORS[entry[0]]
 		h.add_child(sw)
-		h.add_child(_tiny_label(entry[1], COLORS["dim"], 10))
+		h.add_child(skin.tiny_label(entry[1], COLORS["dim"], 10))
 		legend_box.add_child(h)
 
 	_scale_chrome()
@@ -511,11 +385,11 @@ func _scale_chrome() -> void:
 	for node_path: String in CHROME_FONTS.keys():
 		var lab: Label = get_node_or_null(node_path) as Label
 		if lab != null:
-			lab.add_theme_font_size_override("font_size", _fs(int(CHROME_FONTS[node_path])))
-	var bar_h: float = _px(TOP_BAR_H)
+			lab.add_theme_font_size_override("font_size", skin.fs(int(CHROME_FONTS[node_path])))
+	var bar_h: float = skin.px(TOP_BAR_H)
 	($TopBar as PanelContainer).offset_bottom = bar_h
 	stage.offset_top = bar_h
-	ui_scale_slider.custom_minimum_size = Vector2(_px(96.0), 0.0)
+	ui_scale_slider.custom_minimum_size = Vector2(skin.px(96.0), 0.0)
 
 
 func _connect_chrome() -> void:
@@ -619,7 +493,7 @@ func _on_panel_handle_input(event: InputEvent, panel: PanelContainer) -> void:
 
 
 func _on_panel_gui_input(event: InputEvent, panel: PanelContainer) -> void:
-	var grip: float = _px(RESIZE_GRIP)
+	var grip: float = skin.px(RESIZE_GRIP)
 	var corner: Rect2 = Rect2(panel.size - Vector2(grip, grip), Vector2(grip, grip))
 	var mm: InputEventMouseMotion = event as InputEventMouseMotion
 	if mm != null:
@@ -785,8 +659,8 @@ func _draw_crumbs() -> void:
 		var b: Button = Button.new()
 		b.text = p_text
 		b.disabled = current
-		_style_button(b, "flat" if not current else "normal")
-		b.add_theme_font_size_override("font_size", _fs(12))
+		skin.style_button(b, "flat" if not current else "normal")
+		b.add_theme_font_size_override("font_size", skin.fs(12))
 		if current:
 			b.add_theme_color_override("font_disabled_color", COLORS["text"])
 		else:
@@ -794,7 +668,7 @@ func _draw_crumbs() -> void:
 		crumbs_box.add_child(b)
 	mk.call("entry", 0, path.size() == 1)
 	for i: int in range(1, path.size()):
-		var sep: Label = _tiny_label(">" if ConditionNodeData.ascii_mode else "\u203a",
+		var sep: Label = skin.tiny_label(">" if ConditionNodeData.ascii_mode else "\u203a",
 			COLORS["faint"], 11)
 		sep.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 		crumbs_box.add_child(sep)
@@ -862,7 +736,7 @@ func _build_viewport(skip_anim: bool = false) -> void:
 	for n: ConditionNodeData in visible_nodes:
 		var w: GraphNodeWidget = GraphNodeWidget.new()
 		w.unconnected = parent_of[n.id] == null
-		w.setup(n, COLORS, ui_font)
+		w.setup(n, COLORS, skin.font)
 		w.pointer_pressed.connect(_on_widget_pressed)
 		w.context_requested.connect(_on_widget_context)
 		w.port_pressed.connect(_on_port_pressed)
@@ -1558,10 +1432,10 @@ func _group_by_id(gid: String) -> Dictionary:
 ## Drag source callback for a library row. Returns the payload the canvas reads.
 func _begin_group_drag(row: Button, g: Dictionary) -> Variant:
 	var root: ConditionNodeData = g["root"]
-	var chip: Label = _tiny_label("%s  %s" % [root.glyph(), g["name"]], COLORS["text"], 12)
+	var chip: Label = skin.tiny_label("%s  %s" % [root.glyph(), g["name"]], COLORS["text"], 12)
 	var wrap: PanelContainer = PanelContainer.new()
 	wrap.add_theme_stylebox_override("panel",
-		_panel_style(COLORS["surface_hi"], COLORS["sel"], 10, 9))
+		skin.panel_style(COLORS["surface_hi"], COLORS["sel"], 10, 9))
 	wrap.modulate = Color(1, 1, 1, 0.92)
 	wrap.add_child(chip)
 	row.set_drag_preview(wrap)
@@ -1623,8 +1497,8 @@ func _drag_motion() -> void:
 			if drag_panel != null:
 				var want: Vector2 = panel_start_size + (gp - drag_start_screen)
 				drag_panel.custom_minimum_size = Vector2(
-					maxf(want.x, _px(MIN_PANEL_SIZE.x)),
-					maxf(want.y, _px(MIN_PANEL_SIZE.y)))
+					maxf(want.x, skin.px(MIN_PANEL_SIZE.x)),
+					maxf(want.y, skin.px(MIN_PANEL_SIZE.y)))
 				drag_panel.size = drag_panel.custom_minimum_size
 				_clamp_panel(drag_panel)
 
@@ -2094,7 +1968,7 @@ func _render_library() -> void:
 		var l: Label = Label.new()
 		l.text = "Select nodes (add the Output rail for the gate), then \"Save as condition\". Saved conditions are dragged onto the canvas to reuse."
 		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		l.add_theme_font_size_override("font_size", _fs(11))
+		l.add_theme_font_size_override("font_size", skin.fs(11))
 		l.add_theme_color_override("font_color", COLORS["faint"])
 		group_list.add_child(l)
 		return
@@ -2106,7 +1980,7 @@ func _render_library() -> void:
 		b.alignment = HORIZONTAL_ALIGNMENT_LEFT
 		b.tooltip_text = "Drag onto the canvas to place it"
 		b.mouse_default_cursor_shape = Control.CURSOR_DRAG
-		_style_button(b)
+		skin.style_button(b)
 		b.set_drag_forwarding(
 			func(_at: Vector2) -> Variant: return _begin_group_drag(b, gg),
 			func(_at: Vector2, _data: Variant) -> bool: return false,
@@ -2217,7 +2091,7 @@ func _swatch_icon(p_color: Color) -> ImageTexture:
 ##   "disabled": bool, "icon": Texture2D, "sep": bool, "title": String
 func _show_menu(items: Array) -> void:
 	var pm: PopupMenu = PopupMenu.new()
-	pm.add_theme_font_size_override("font_size", _fs(12))
+	pm.add_theme_font_size_override("font_size", skin.fs(12))
 	var actions: Array[Callable] = []
 	for it: Dictionary in items:
 		if it.get("sep", false):
@@ -2390,7 +2264,7 @@ func _render_vars() -> void:
 		c.queue_free()
 	var by_cat: Dictionary = _variables_by_category()
 	for cat: String in by_cat.keys():
-		var header: Label = _tiny_label(cat.to_upper(), COLORS["faint"], 9)
+		var header: Label = skin.tiny_label(cat.to_upper(), COLORS["faint"], 9)
 		vars_list.add_child(header)
 		if cat == AntSchema.CATEGORY_ACTION:
 			vars_list.add_child(_build_action_picker())
@@ -2402,7 +2276,7 @@ func _render_vars() -> void:
 ## One dropdown for the whole Action category - the ant is only ever doing one.
 func _build_action_picker() -> Control:
 	var ob: OptionButton = OptionButton.new()
-	_style_option(ob)
+	skin.style_option(ob)
 	var names: Array[String] = AntSchema.action_variables()
 	for i: int in names.size():
 		ob.add_item(names[i].trim_prefix("is_").replace("_", " "), i)
@@ -2416,7 +2290,7 @@ func _build_var_row(var_name: String) -> Control:
 	var wrap: VBoxContainer = VBoxContainer.new()
 	wrap.add_theme_constant_override("separation", 4)
 	var head: HBoxContainer = HBoxContainer.new()
-	var name_label: Label = _tiny_label(var_name, COLORS["text"], 12)
+	var name_label: Label = skin.tiny_label(var_name, COLORS["text"], 12)
 	name_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	name_label.tooltip_text = var_name
 	head.add_child(name_label)
@@ -2425,7 +2299,7 @@ func _build_var_row(var_name: String) -> Control:
 		var cb: CheckButton = CheckButton.new()
 		cb.button_pressed = test_vars[var_name]
 		cb.text = "true" if test_vars[var_name] else "false"
-		cb.add_theme_font_size_override("font_size", _fs(11))
+		cb.add_theme_font_size_override("font_size", skin.fs(11))
 		cb.add_theme_color_override("font_color", COLORS["dim"])
 		cb.focus_mode = Control.FOCUS_NONE
 		cb.toggled.connect(func(on: bool) -> void:
@@ -2440,7 +2314,7 @@ func _build_var_row(var_name: String) -> Control:
 	var spec: Dictionary = AntSchema.describe(var_name)
 	var low: float = spec["min"]
 	var high: float = spec["max"]
-	var value_label: Label = _tiny_label(
+	var value_label: Label = skin.tiny_label(
 		str(test_vars[var_name]), COLORS["property"], 12)
 	head.add_child(value_label)
 	var slider: HSlider = HSlider.new()
@@ -2463,7 +2337,7 @@ func _build_var_row(var_name: String) -> Control:
 func _build_vector_editor(var_name: String, head: HBoxContainer) -> Control:
 	var top: float = maxf(0.001, AntSchema.max_of(var_name))
 	var current: Vector2 = test_vars[var_name]
-	var value_label: Label = _tiny_label(_vec_text(current), COLORS["vector"], 12)
+	var value_label: Label = skin.tiny_label(_vec_text(current), COLORS["vector"], 12)
 	head.add_child(value_label)
 
 	var box: VBoxContainer = VBoxContainer.new()
@@ -2490,9 +2364,9 @@ func _build_vector_editor(var_name: String, head: HBoxContainer) -> Control:
 	angle_slider.value_changed.connect(func(_v: float) -> void: apply.call())
 	length_slider.value_changed.connect(func(_v: float) -> void: apply.call())
 
-	box.add_child(_tiny_label("angle", COLORS["faint"], 9))
+	box.add_child(skin.tiny_label("angle", COLORS["faint"], 9))
 	box.add_child(angle_slider)
-	box.add_child(_tiny_label("length", COLORS["faint"], 9))
+	box.add_child(skin.tiny_label("length", COLORS["faint"], 9))
 	box.add_child(length_slider)
 	return box
 
@@ -2507,14 +2381,14 @@ func _vec_text(v: Vector2) -> String:
 # Inspector
 # ============================================================================
 func _form_label(p_text: String) -> Label:
-	return _tiny_label(p_text.to_upper(), COLORS["faint"], 9)
+	return skin.tiny_label(p_text.to_upper(), COLORS["faint"], 9)
 
 
 func _form_help(p_text: String) -> Label:
 	var help: Label = Label.new()
 	help.text = p_text
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	help.add_theme_font_size_override("font_size", _fs(11))
+	help.add_theme_font_size_override("font_size", skin.fs(11))
 	help.add_theme_color_override("font_color", COLORS["faint"])
 	return help
 
@@ -2534,7 +2408,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(_form_label("Value"))
 			var le: LineEdit = LineEdit.new()
 			le.text = node.label
-			_style_line_edit(le)
+			skin.style_line_edit(le)
 			le.text_changed.connect(func(t: String) -> void:
 				node.label = t
 				insp_title.text = node.display_label()
@@ -2550,7 +2424,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			ob.add_item("float")
 			ob.add_item("int")
 			ob.selected = 1 if node.type == "int" else 0
-			_style_option(ob)
+			skin.style_option(ob)
 			ob.item_selected.connect(func(i: int) -> void:
 				node.type = "int" if i == 1 else "float"
 				_commit_edit())
@@ -2558,7 +2432,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 		"property":
 			form_box.add_child(_form_label("Tracks variable"))
 			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
+			skin.style_option(ob)
 			var by_id: Dictionary = {}
 			var next_id: int = 0
 			var grouped: Dictionary = _variables_by_category()
@@ -2595,7 +2469,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 		"compare":
 			form_box.add_child(_form_label("Comparison"))
 			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
+			skin.style_option(ob)
 			for i: int in ConditionNodeData.CMP_OPS.size():
 				var op: String = ConditionNodeData.CMP_OPS[i]
 				ob.add_item(ConditionNodeData.op_name(op), i)
@@ -2612,7 +2486,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(_form_label("Name"))
 			var le: LineEdit = LineEdit.new()
 			le.text = node.label
-			_style_line_edit(le)
+			skin.style_line_edit(le)
 			le.text_changed.connect(func(t: String) -> void:
 				node.label = t
 				insp_title.text = node.display_label()
@@ -2625,7 +2499,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(le)
 			form_box.add_child(_form_label("Gate"))
 			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
+			skin.style_option(ob)
 			for i: int in ConditionNodeData.LOGIC_OPS.size():
 				var op: String = ConditionNodeData.LOGIC_OPS[i]
 				ob.add_item(ConditionNodeData.op_name(op), i)
@@ -2639,7 +2513,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 		"timing":
 			form_box.add_child(_form_label("Behaviour"))
 			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
+			skin.style_option(ob)
 			for i: int in ConditionNodeData.TIMING_OPS.size():
 				var op: String = ConditionNodeData.TIMING_OPS[i]
 				ob.add_item(ConditionNodeData.op_name(op), i)
@@ -2656,7 +2530,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			spin.step = 0.1
 			spin.value = node.seconds
 			spin.editable = node.op != "latch"
-			_style_spin(spin)
+			skin.style_spin(spin)
 			spin.value_changed.connect(func(v: float) -> void:
 				node.seconds = maxf(0.0, v)
 				_commit_edit())
@@ -2666,7 +2540,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 		"query":
 			form_box.add_child(_form_label("Measure"))
 			var measure_ob: OptionButton = OptionButton.new()
-			_style_option(measure_ob)
+			skin.style_option(measure_ob)
 			for i: int in ConditionNodeData.QUERY_MEASURES.size():
 				var m: String = ConditionNodeData.QUERY_MEASURES[i]
 				measure_ob.add_item(str(ConditionNodeData.MEASURE_WORDS.get(m, m)), i)
@@ -2680,7 +2554,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(measure_ob)
 			form_box.add_child(_form_label("Subject"))
 			var subject_ob: OptionButton = OptionButton.new()
-			_style_option(subject_ob)
+			skin.style_option(subject_ob)
 			var subjects: Array = ConditionNodeData.SUBJECT_WORDS.keys()
 			for i: int in subjects.size():
 				var s: String = subjects[i]
@@ -2694,7 +2568,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			form_box.add_child(subject_ob)
 			form_box.add_child(_form_label("Scope"))
 			var scope_ob: OptionButton = OptionButton.new()
-			_style_option(scope_ob)
+			skin.style_option(scope_ob)
 			for i: int in ConditionNodeData.QUERY_SCOPES.size():
 				var sc: String = ConditionNodeData.QUERY_SCOPES[i]
 				scope_ob.add_item("%s (%s)" % [
@@ -2711,13 +2585,13 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 			var key_le: LineEdit = LineEdit.new()
 			key_le.text = node.var_key()
 			key_le.editable = false
-			_style_line_edit(key_le)
+			skin.style_line_edit(key_le)
 			key_le.add_theme_color_override("font_uneditable_color", COLORS["faint"])
 			form_box.add_child(key_le)
 		"vector":
 			form_box.add_child(_form_label("Operation"))
 			var ob: OptionButton = OptionButton.new()
-			_style_option(ob)
+			skin.style_option(ob)
 			for i: int in ConditionNodeData.VECTOR_OPS.size():
 				var vop: String = ConditionNodeData.VECTOR_OPS[i]
 				ob.add_item(ConditionNodeData.VECTOR_NAMES.get(vop, vop), i)
@@ -2737,7 +2611,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				sx.max_value = 9999.0
 				sx.step = 0.1
 				sx.value = node.vec.x
-				_style_spin(sx)
+				skin.style_spin(sx)
 				sx.value_changed.connect(func(v: float) -> void:
 					node.vec.x = v
 					_commit_edit())
@@ -2746,7 +2620,7 @@ func _build_inspector_form(node: ConditionNodeData) -> void:
 				sy.max_value = 9999.0
 				sy.step = 0.1
 				sy.value = node.vec.y
-				_style_spin(sy)
+				skin.style_spin(sy)
 				sy.value_changed.connect(func(v: float) -> void:
 					node.vec.y = v
 					_commit_edit())
