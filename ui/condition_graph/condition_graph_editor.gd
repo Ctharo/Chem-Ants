@@ -30,6 +30,14 @@ const CLICK_SLOP: float = 4.0
 const SINGLE_CLICK_DELAY: float = 0.27
 const MIN_ZOOM: float = 0.4
 const MAX_ZOOM: float = 2.0
+const MIN_UI_SCALE: float = 0.75
+const MAX_UI_SCALE: float = 2.5
+## Height the layout was authored against; used to derive an automatic scale.
+const DESIGN_HEIGHT: float = 900.0
+
+var ui_scale: float = 1.0
+
+
 ## Payload tag for library -> canvas drag and drop.
 const DRAG_CONDITION: String = "chem_ants/condition_group"
 
@@ -241,6 +249,9 @@ func _ready() -> void:
 	world.move_child(rail, world.get_child_count() - 1)
 	behavior_label.text = behavior_title
 	stage.resized.connect(func() -> void: _build_viewport(true))
+	var win: Window = get_window()
+	win.size_changed.connect(func() -> void: _set_ui_scale(_auto_ui_scale()))
+	_set_ui_scale(_auto_ui_scale())
 	grid_layer.draw.connect(_draw_grid)
 	path = [tree_root]
 	expanded = _layer_expansion(tree_root.id)
@@ -506,6 +517,7 @@ func _draw_grid() -> void:
 # Core helpers
 # ============================================================================
 func _focus() -> ConditionNodeData:
+	assert(not path.is_empty(), "_focus(): path emptied - check _go_to()/_go_back().")
 	return path[path.size() - 1]
 
 
@@ -2592,3 +2604,22 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		else:
 			_go_back()
 		get_viewport().set_input_as_handled()
+
+func _set_ui_scale(next: float) -> void:
+	ui_scale = clampf(snappedf(next, 0.05), MIN_UI_SCALE, MAX_UI_SCALE)
+	get_window().content_scale_factor = ui_scale
+	# The root viewport resizes, which fires stage.resized -> _build_viewport.
+
+
+## Scale from the window's short edge so a 4K panel doesn't render 10px labels.
+func _auto_ui_scale() -> float:
+	var win_h: float = float(get_window().size.y)
+	return clampf(snappedf(win_h / DESIGN_HEIGHT, 0.25), MIN_UI_SCALE, MAX_UI_SCALE)
+
+
+func _toggle_fullscreen() -> void:
+	var win: Window = get_window()
+	var was_full: bool = win.mode == Window.MODE_FULLSCREEN \
+		or win.mode == Window.MODE_EXCLUSIVE_FULLSCREEN
+	win.mode = Window.MODE_WINDOWED if was_full else Window.MODE_FULLSCREEN
+	_set_ui_scale(_auto_ui_scale())
