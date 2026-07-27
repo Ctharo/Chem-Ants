@@ -472,7 +472,6 @@ func _setup_movable_panels() -> void:
 		var fill_path: String = str(spec["fill"])
 		if fill_path != "":
 			var fill: Control = panel.get_node(fill_path) as Control
-			fill.custom_minimum_size = Vector2.ZERO
 			fill.size_flags_vertical = Control.SIZE_EXPAND_FILL
 
 
