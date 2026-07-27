@@ -344,18 +344,10 @@ The graph must be able to read what happened, or the player cannot author recove
 - `last_action_failed` — true for one tick after a failed attempt
 - `carry_mass`, `is_carrying_food`
 
-### 5.6 Open: arbitration
+### 5.6 Arbitration
 
-**Unresolved.** When several rules are simultaneously true and only one exclusive action can run, what wins? This determines whether behaviours compile to a prioritised rule list or something richer, so it shapes the compiler and must be settled before compiler work begins.
 
-Candidates:
-
-1. **Ordered list, first match wins.** Simple, predictable, teaches priority thinking. The player reorders by dragging. Cheapest to evaluate — early-out on the first true condition.
-2. **Explicit priority values.** More flexible, harder to reason about, invites tie-break ambiguity.
-3. **Utility scoring.** Each rule produces a float; highest wins. Expressive, much harder to debug, and defeats early-out because every rule must be evaluated.
-4. **Subsumption layers.** Higher layers override lower ones. Matches the robotics literature; possibly too abstract.
-
-Option 1 interacts well with the cost model: a well-ordered rule list is genuinely cheaper to run, which is a real lesson worth teaching rather than an arbitrary rule.
+**Ordered list, first match wins.** Simple, predictable, teaches priority thinking. The player reorders by dragging. Cheapest to evaluate — early-out on the first true condition.
 
 ---
 
@@ -716,10 +708,9 @@ Strict Godot 4.x typing throughout:
 
 | # | Item | Blocks |
 |---|---|---|
-| 1 | **Action arbitration model** (§5.6) | Compiler architecture — settle before compiler work starts |
-| 2 | Receptor calibration: where `ODOR_MIN` sits, log curve shape, whether noise ships (§6.5) | Field and sensing tuning |
-| 3 | Cost-model weight calibration (§9.1) | Benchmarking credibility |
-| 4 | Caste stat clamp ranges and the spawn-cost formula derived from them (§11.2) | Colony balance |
-| 5 | Memory node window cap for `min_over` / `max_over` (§4.9) | Per-ant memory budget |
+| 1 | Receptor calibration: where `ODOR_MIN` sits, log curve shape, whether noise ships (§6.5) | Field and sensing tuning |
+| 2 | Cost-model weight calibration (§9.1) | Benchmarking credibility |
+| 3 | Caste stat clamp ranges and the spawn-cost formula derived from them (§11.2) | Colony balance |
+| 4 | Memory node window cap for `min_over` / `max_over` (§4.9) | Per-ant memory budget |
 
-Item 2 cannot be settled on paper. The detection floor determines whether trail-following is a puzzle or a formality, and it needs a prototype with a slider.
+Item 1 cannot be settled on paper. The detection floor determines whether trail-following is a puzzle or a formality, and it needs a prototype with a slider.
